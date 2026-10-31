@@ -580,22 +580,13 @@ static void VCMSharedStateDidChange(CFNotificationCenterRef center,
     _mirrorEnabled = [state[@"mirrorEnabled"] boolValue];
     _motionEnabled = [state[@"motionEnabled"] boolValue];
 
-    BOOL revisionChanged = hasMedia && revision > 0 &&
+    // Load the new revision in the background without discarding the last
+    // valid frame. The old image/video remains on screen until decoding of the
+    // replacement succeeds, preventing black/transparent gaps during swaps.
+    BOOL needsLoad = hasMedia && revision > 0 &&
         revision != _loadedRevision &&
         revision != _loadingRevision &&
-        revision != _failedRevision;
-    if (revisionChanged) {
-        // Never keep serving the previous still/video while a newer selection
-        // is waiting to be decoded, including while virtual camera is disabled.
-        _stillImage = nil;
-        [_videoFrames removeAllObjects];
-        _lastVideoFrame = nil;
-        _loadedRevision = -1;
-        _failedRevision = -1;
-    }
-
-    BOOL needsLoad = hasMedia && revision > 0 &&
-        revision != _loadedRevision && !_loading &&
+        !_loading &&
         (revision != _failedRevision || CACurrentMediaTime() - _lastLoadAttempt > 5.0);
     if (needsLoad) {
         _loading = YES;
@@ -955,7 +946,8 @@ static void VCMSharedStateDidChange(CFNotificationCenterRef center,
     CGAffineTransform preferredTransform = CGAffineTransformIdentity;
 
     [_lock lock];
-    BOOL active = _enabled && !_loading;
+    // Keep the previous valid source active while a new revision is loading.
+    BOOL active = _enabled;
     if (active && [_mediaType isEqualToString:@"image"]) {
         sourceImage = _stillImage;
     } else if (active && [_mediaType isEqualToString:@"video"]) {
