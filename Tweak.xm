@@ -1345,6 +1345,8 @@ static NSData *VCamEncodeJPEGAsUTI(NSData *jpegData, NSString *uti) {
         return;
     }
 
+    self.sourcePreviewImage = nil;
+    self.previewImageView.image = nil;
     self.placeholderLabel.text = [mediaType isEqualToString:@"video"]
         ? @"Preparando vista previa…"
         : @"Cargando imagen…";
