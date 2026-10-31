@@ -854,7 +854,43 @@ static void VCamAttachPreviewOverlay(AVCaptureVideoPreviewLayer *previewLayer) {
 
 %end
 
-// La orientación de cada app se conserva; no forzamos AVCaptureConnection.
+// Use one canonical portrait orientation for every AVFoundation client.
+// This changes only the connection's orientation contract; frame rendering,
+// zoom, crop, motion and the panel preview remain untouched.
+%hook AVCaptureConnection
+
+- (void)setVideoOrientation:(AVCaptureVideoOrientation)videoOrientation {
+    if (VCamIsEnabled() && self.isVideoOrientationSupported) {
+        %orig(AVCaptureVideoOrientationPortrait);
+        return;
+    }
+    %orig(videoOrientation);
+}
+
+- (AVCaptureVideoOrientation)videoOrientation {
+    AVCaptureVideoOrientation current = %orig;
+    if (VCamIsEnabled() && self.isVideoOrientationSupported) {
+        return AVCaptureVideoOrientationPortrait;
+    }
+    return current;
+}
+
+%end
+
+%hook AVCaptureSession
+
+- (void)startRunning {
+    %orig;
+    if (!VCamIsEnabled()) return;
+    for (AVCaptureConnection *connection in self.connections) {
+        if (connection.isVideoOrientationSupported &&
+            connection.videoOrientation != AVCaptureVideoOrientationPortrait) {
+            connection.videoOrientation = AVCaptureVideoOrientationPortrait;
+        }
+    }
+}
+
+%end
 
 %hook AVCaptureVideoPreviewLayer
 
