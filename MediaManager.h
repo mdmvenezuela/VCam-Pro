@@ -1,38 +1,41 @@
 #import <Foundation/Foundation.h>
+#import <UIKit/UIKit.h>
 #import <AVFoundation/AVFoundation.h>
 #import <CoreMedia/CoreMedia.h>
 #import <CoreVideo/CoreVideo.h>
 
-typedef NS_ENUM(NSInteger, VCamMode) {
-    VCamModeVideo,
-    VCamModePhoto,
-    VCamModeBlack,
+NS_ASSUME_NONNULL_BEGIN
+
+typedef NS_ENUM(NSInteger, VCamMediaMode) {
+    VCamMediaModeNone = 0,
+    VCamMediaModePhoto = 1,
+    VCamMediaModeVideo = 2
 };
 
 @interface MediaManager : NSObject
 
-@property (nonatomic, assign) VCamMode mode;
-@property (nonatomic, strong, nullable) AVAsset *currentAsset;
-@property (nonatomic, strong, nullable) AVAssetReader *videoReader;
-@property (nonatomic, strong, nullable) AVAssetReader *audioReader;
-@property (nonatomic, strong, nullable) AVAssetReaderTrackOutput *videoOutput;
-@property (nonatomic, strong, nullable) AVAssetReaderTrackOutput *audioOutput;
-@property (nonatomic, assign) CGSize videoSize;
-@property (nonatomic, assign) CMTime videoDuration;
+@property (nonatomic, assign, readonly) VCamMediaMode mode;
+@property (nonatomic, assign, readonly, getter=isReady) BOOL ready;
+@property (nonatomic, assign, readonly, getter=isRunning) BOOL running;
 @property (nonatomic, assign) BOOL loopPlayback;
-@property (nonatomic, assign) BOOL isRunning;
 
-+ (nonnull instancetype)sharedManager;
++ (instancetype)sharedManager;
 
-- (void)loadMediaFromURL:(nonnull NSURL *)url;
-- (void)resetReaders;
+- (void)loadMediaFromURL:(NSURL *)url
+               mediaType:(NSString *)mediaType
+              completion:(void (^)(BOOL success, NSError * _Nullable error))completion;
 
-- (nullable CMSampleBufferRef)nextVideoFrame CF_RETURNS_RETAINED;
-- (nullable CMSampleBufferRef)nextAudioFrame CF_RETURNS_RETAINED;
-- (nullable CMSampleBufferRef)generateBlackFrameWithSize:(CGSize)size
-                                         presentationTime:(CMTime)pts CF_RETURNS_RETAINED;
-
+- (void)setZoom:(CGFloat)zoom offsetX:(CGFloat)offsetX offsetY:(CGFloat)offsetY;
 - (void)start;
 - (void)stop;
 
+/// Returns a retained sample buffer in the requested dimensions/pixel format.
+- (nullable CMSampleBufferRef)nextVideoFrameForSize:(CGSize)size
+                                         pixelFormat:(OSType)pixelFormat CF_RETURNS_RETAINED;
+
+/// Returns JPEG data for a still-photo capture path.
+- (nullable NSData *)nextPhotoData;
+
 @end
+
+NS_ASSUME_NONNULL_END
