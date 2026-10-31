@@ -427,10 +427,9 @@ static void VCamRefreshFromServer(void) {
         if (g_isSpringBoardProcess) return;
 
         UIApplication *application = [UIApplication sharedApplication];
-        if (application.applicationState != UIApplicationStateActive) return;
-
         MediaManager *manager = [MediaManager sharedManager];
         [manager setZoom:g_vcamZoom offsetX:g_vcamOffsetX offsetY:g_vcamOffsetY];
+        [manager setRotationDegrees:g_vcamRotationDegrees];
 
         if (!enabled) {
             [manager stop];
@@ -461,7 +460,11 @@ static void VCamRefreshFromServer(void) {
                         NSData *stillJPEG = [manager nextPhotoData];
                         if (stillJPEG) VCamUpdatePreviewOverlaysWithJPEG(stillJPEG);
                     }
-                    [manager start];
+                    if ([UIApplication sharedApplication].applicationState == UIApplicationStateActive) {
+                        [manager start];
+                    } else {
+                        [manager stop];
+                    }
                     NSLog(@"[VCam Pro] Medio remoto listo en %@ (rev %ld).", [[NSBundle mainBundle] bundleIdentifier], (long)mediaRevision);
                 } else {
                     if (!success) g_failedMediaRevision = mediaRevision;
@@ -472,8 +475,13 @@ static void VCamRefreshFromServer(void) {
                 VCamRefreshFromServer();
             }];
         } else if (enabled) {
-            if (manager.isReady) [manager start];
-            else NSLog(@"[VCam Pro] VCam está activado pero este proceso aún no tiene medio cargado.");
+            if (application.applicationState == UIApplicationStateActive && manager.isReady) {
+                [manager start];
+            } else if (application.applicationState != UIApplicationStateActive) {
+                [manager stop];
+            } else {
+                NSLog(@"[VCam Pro] VCam está activado pero este proceso aún no tiene medio cargado.");
+            }
         }
     });
 }
@@ -1178,7 +1186,7 @@ static NSData *VCamEncodeJPEGAsUTI(NSData *jpegData, NSString *uti) {
     CGFloat renderedWidth = imageSize.width * scale;
     CGFloat renderedHeight = imageSize.height * scale;
     CGFloat centerX = width * 0.5 + g_vcamOffsetX * width;
-    CGFloat centerY = height * 0.5 - g_vcamOffsetY * height;
+    CGFloat centerY = height * 0.5 + g_vcamOffsetY * height;
     self.previewImageView.transform = CGAffineTransformIdentity;
     self.previewImageView.bounds = CGRectMake(0, 0, renderedWidth, renderedHeight);
     self.previewImageView.center = CGPointMake(centerX, centerY);
@@ -1205,7 +1213,13 @@ static NSData *VCamEncodeJPEGAsUTI(NSData *jpegData, NSString *uti) {
         @autoreleasepool {
             UIImage *preview = nil;
             if ([mediaType isEqualToString:@"image"]) {
-                preview = [UIImage imageWithContentsOfFile:path];
+                UIImage *sourcePreview = [UIImage imageWithContentsOfFile:path];
+                if (sourcePreview) {
+                    UIGraphicsBeginImageContextWithOptions(sourcePreview.size, NO, 1.0);
+                    [sourcePreview drawInRect:CGRectMake(0, 0, sourcePreview.size.width, sourcePreview.size.height)];
+                    preview = UIGraphicsGetImageFromCurrentImageContext();
+                    UIGraphicsEndImageContext();
+                }
             } else if ([mediaType isEqualToString:@"video"]) {
                 AVURLAsset *asset = [AVURLAsset URLAssetWithURL:[NSURL fileURLWithPath:path] options:nil];
                 AVAssetImageGenerator *generator = [[AVAssetImageGenerator alloc] initWithAsset:asset];
@@ -1221,6 +1235,14 @@ static NSData *VCamEncodeJPEGAsUTI(NSData *jpegData, NSString *uti) {
                 } else if (error) {
                     NSLog(@"[VCam Pro] No se pudo generar la miniatura del vídeo: %@", error);
                 }
+            }
+
+            if (preview && preview.imageOrientation != UIImageOrientationUp) {
+                UIGraphicsBeginImageContextWithOptions(preview.size, NO, 1.0);
+                [preview drawInRect:CGRectMake(0, 0, preview.size.width, preview.size.height)];
+                UIImage *uprightPreview = UIGraphicsGetImageFromCurrentImageContext();
+                UIGraphicsEndImageContext();
+                if (uprightPreview) preview = uprightPreview;
             }
 
             dispatch_async(dispatch_get_main_queue(), ^{
@@ -1252,8 +1274,8 @@ static NSData *VCamEncodeJPEGAsUTI(NSData *jpegData, NSString *uti) {
     [self refreshFraming];
 }
 
-- (void)moveUp { g_vcamOffsetY += 0.06; [self publishTransform]; }
-- (void)moveDown { g_vcamOffsetY -= 0.06; [self publishTransform]; }
+- (void)moveUp { g_vcamOffsetY -= 0.06; [self publishTransform]; }
+- (void)moveDown { g_vcamOffsetY += 0.06; [self publishTransform]; }
 - (void)moveLeft { g_vcamOffsetX -= 0.06; [self publishTransform]; }
 - (void)moveRight { g_vcamOffsetX += 0.06; [self publishTransform]; }
 - (void)zoomIn { g_vcamZoom += 0.1; [self publishTransform]; }
@@ -1560,6 +1582,7 @@ static void VCamShowMenu(void) {
         VCamSetPreviewOverlaysVisible(nextEnabled);
         VCamUpdateButton();
         [[MediaManager sharedManager] setZoom:g_vcamZoom offsetX:g_vcamOffsetX offsetY:g_vcamOffsetY];
+        [[MediaManager sharedManager] setRotationDegrees:g_vcamRotationDegrees];
         if (nextEnabled) [[MediaManager sharedManager] start];
         else [[MediaManager sharedManager] stop];
     }]];
