@@ -48,8 +48,6 @@ static char g_darwinObserverToken;
 static const void *kVCamDelegateProxyKey = &kVCamDelegateProxyKey;
 static NSUInteger g_vcamVideoCallbackCount = 0;
 static NSUInteger g_vcamVideoReplacementCount = 0;
-static NSString *g_localMediaPath = nil;
-static NSString *g_localMediaType = nil;
 static NSHashTable<CALayer *> *g_previewOverlayLayers = nil;
 static CIContext *g_previewCIContext = nil;
 static dispatch_source_t g_previewPumpTimer = nil;
@@ -467,10 +465,6 @@ static void VCamRefreshFromServer(void) {
                 g_loadingMediaRevision = -1;
                 if (success && VCamIsEnabled()) {
                     g_lastMediaRevision = mediaRevision;
-                    @synchronized ([MediaManager class]) {
-                        g_localMediaPath = [localPath copy];
-                        g_localMediaType = [mediaType copy];
-                    }
                     [manager setZoom:g_vcamZoom offsetX:g_vcamOffsetX offsetY:g_vcamOffsetY];
                     if ([mediaType isEqualToString:@"image"]) {
                         NSData *stillJPEG = [manager nextPhotoData];
@@ -913,137 +907,10 @@ static NSData *VCamEncodeJPEGAsUTI(NSData *jpegData, NSString *uti) {
 %end
 
 
-#pragma mark - Movie File Output Replacement
-
-static BOOL VCamReplaceRecordingFile(NSURL *destinationURL, NSString *sourcePath) {
-    if (!destinationURL.isFileURL || !sourcePath.length) return NO;
-
-    NSURL *sourceURL = [NSURL fileURLWithPath:sourcePath];
-    if ([sourceURL.path isEqualToString:destinationURL.path]) return NO;
-
-    NSFileManager *fileManager = [NSFileManager defaultManager];
-    if (![fileManager fileExistsAtPath:sourceURL.path]) return NO;
-
-    NSString *directory = destinationURL.URLByDeletingLastPathComponent.path;
-    NSString *extension = destinationURL.pathExtension.length ? destinationURL.pathExtension : sourceURL.pathExtension;
-    if (!extension.length) extension = @"mov";
-
-    NSString *token = NSUUID.UUID.UUIDString;
-    NSURL *temporaryURL = [NSURL fileURLWithPath:
-        [directory stringByAppendingPathComponent:
-            [NSString stringWithFormat:@".vcam-replacement-%@.%@", token, extension]]];
-    NSURL *backupURL = [NSURL fileURLWithPath:
-        [directory stringByAppendingPathComponent:
-            [NSString stringWithFormat:@".vcam-original-%@.%@", token, extension]]];
-
-    NSError *error = nil;
-    if (![fileManager copyItemAtURL:sourceURL toURL:temporaryURL error:&error]) {
-        NSLog(@"[VCam Pro] No se pudo preparar el vídeo virtual: %@", error);
-        return NO;
-    }
-
-    BOOL hadOriginal = [fileManager fileExistsAtPath:destinationURL.path];
-    if (hadOriginal && ![fileManager moveItemAtURL:destinationURL toURL:backupURL error:&error]) {
-        [fileManager removeItemAtURL:temporaryURL error:nil];
-        NSLog(@"[VCam Pro] No se pudo respaldar el vídeo grabado: %@", error);
-        return NO;
-    }
-
-    if (![fileManager moveItemAtURL:temporaryURL toURL:destinationURL error:&error]) {
-        if (hadOriginal) [fileManager moveItemAtURL:backupURL toURL:destinationURL error:nil];
-        [fileManager removeItemAtURL:temporaryURL error:nil];
-        NSLog(@"[VCam Pro] No se pudo sustituir el archivo grabado: %@", error);
-        return NO;
-    }
-
-    if (hadOriginal) [fileManager removeItemAtURL:backupURL error:nil];
-    NSLog(@"[VCam Pro] Archivo de grabación sustituido por el vídeo seleccionado.");
-    return YES;
-}
-
-@interface VCamMovieRecordingDelegateProxy : NSObject <AVCaptureFileOutputRecordingDelegate>
-@property (nonatomic, weak) id<AVCaptureFileOutputRecordingDelegate> originalDelegate;
-@property (nonatomic, copy) NSString *sourceMediaPath;
-@property (nonatomic, copy) NSString *sourceMediaType;
-- (instancetype)initWithDelegate:(id<AVCaptureFileOutputRecordingDelegate>)delegate
-                       sourcePath:(NSString *)sourcePath
-                       sourceType:(NSString *)sourceType;
-@end
-
-@implementation VCamMovieRecordingDelegateProxy
-
-- (instancetype)initWithDelegate:(id<AVCaptureFileOutputRecordingDelegate>)delegate
-                       sourcePath:(NSString *)sourcePath
-                       sourceType:(NSString *)sourceType {
-    self = [super init];
-    if (self) {
-        _originalDelegate = delegate;
-        _sourceMediaPath = [sourcePath copy];
-        _sourceMediaType = [sourceType copy];
-    }
-    return self;
-}
-
-- (BOOL)respondsToSelector:(SEL)selector {
-    return [super respondsToSelector:selector] || [self.originalDelegate respondsToSelector:selector];
-}
-
-- (id)forwardingTargetForSelector:(SEL)selector {
-    if ([self.originalDelegate respondsToSelector:selector]) return self.originalDelegate;
-    return [super forwardingTargetForSelector:selector];
-}
-
-- (void)captureOutput:(AVCaptureFileOutput *)output
-didFinishRecordingToOutputFileAtURL:(NSURL *)outputFileURL
-      fromConnections:(NSArray<AVCaptureConnection *> *)connections
-                error:(NSError *)error {
-
-    if (!error && VCamIsEnabled() &&
-        [self.sourceMediaType isEqualToString:@"video"] &&
-        self.sourceMediaPath.length > 0) {
-        VCamReplaceRecordingFile(outputFileURL, self.sourceMediaPath);
-    }
-
-    id<AVCaptureFileOutputRecordingDelegate> delegate = self.originalDelegate;
-    if ([delegate respondsToSelector:
-         @selector(captureOutput:didFinishRecordingToOutputFileAtURL:fromConnections:error:)]) {
-        [delegate captureOutput:output
-didFinishRecordingToOutputFileAtURL:outputFileURL
-              fromConnections:connections
-                        error:error];
-    }
-
-    objc_setAssociatedObject(output, kVCamDelegateProxyKey, nil, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
-}
-
-@end
-
-%hook AVCaptureFileOutput
-
-- (void)startRecordingToOutputFileURL:(NSURL *)outputFileURL
-                    recordingDelegate:(id<AVCaptureFileOutputRecordingDelegate>)delegate {
-    if (!delegate || [delegate isKindOfClass:[VCamMovieRecordingDelegateProxy class]]) {
-        %orig(outputFileURL, delegate);
-        return;
-    }
-
-    NSString *sourcePath = nil;
-    NSString *sourceType = nil;
-    @synchronized ([MediaManager class]) {
-        sourcePath = [g_localMediaPath copy];
-        sourceType = [g_localMediaType copy];
-    }
-
-    VCamMovieRecordingDelegateProxy *proxy =
-        [[VCamMovieRecordingDelegateProxy alloc] initWithDelegate:delegate
-                                                       sourcePath:sourcePath ?: @""
-                                                       sourceType:sourceType ?: @""];
-
-    objc_setAssociatedObject(self, kVCamDelegateProxyKey, proxy, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
-    %orig(outputFileURL, proxy);
-}
-
-%end
+// AVCaptureMovieFileOutput is intentionally left untouched in this release.
+// Replacing a completed movie requires an AVAssetExportSession transcode that
+// matches the destination container; copying bytes under a different extension
+// could produce an unreadable recording.
 
 #pragma mark - Floating Button
 
