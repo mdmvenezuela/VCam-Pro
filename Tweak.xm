@@ -39,6 +39,7 @@ static CGFloat g_vcamButtonX = 0.92;
 static CGFloat g_vcamButtonY = 0.24;
 static NSInteger g_lastMediaRevision = -1;
 static NSInteger g_loadingMediaRevision = -1;
+static NSInteger g_failedMediaRevision = -1;
 static dispatch_queue_t g_syncQueue;
 static UIWindow *g_overlayWindow = nil;
 static UIViewController *g_overlayController = nil;
@@ -434,14 +435,17 @@ static void VCamRefreshFromServer(void) {
         if (!enabled) {
             [manager stop];
             NSLog(@"[VCam Pro] Estado remoto desactivado (rev %ld).", (long)stateRevision);
-        } else if (mediaRevision > 0 && mediaRevision != g_lastMediaRevision && mediaRevision != g_loadingMediaRevision) {
+        } else if (mediaRevision > 0 && mediaRevision != g_lastMediaRevision &&
+                   mediaRevision != g_failedMediaRevision && g_loadingMediaRevision == -1) {
             g_loadingMediaRevision = mediaRevision;
             NSString *extension = [state[@"mediaExtension"] isKindOfClass:[NSString class]] ? state[@"mediaExtension"] : @"mp4";
             NSString *mediaType = [state[@"mediaType"] isKindOfClass:[NSString class]] ? state[@"mediaType"] : @"video";
             NSString *localPath = VCamDownloadCurrentMedia(extension, mediaRevision);
             if (!localPath) {
                 g_loadingMediaRevision = -1;
+                g_failedMediaRevision = mediaRevision;
                 VCamSetLocalEnabled(NO);
+                VCamRefreshFromServer();
                 return;
             }
 
@@ -451,6 +455,7 @@ static void VCamRefreshFromServer(void) {
                 g_loadingMediaRevision = -1;
                 if (success && VCamIsEnabled()) {
                     g_lastMediaRevision = mediaRevision;
+                    g_failedMediaRevision = -1;
                     [manager setZoom:g_vcamZoom offsetX:g_vcamOffsetX offsetY:g_vcamOffsetY];
                     if ([mediaType isEqualToString:@"image"]) {
                         NSData *stillJPEG = [manager nextPhotoData];
@@ -459,9 +464,12 @@ static void VCamRefreshFromServer(void) {
                     [manager start];
                     NSLog(@"[VCam Pro] Medio remoto listo en %@ (rev %ld).", [[NSBundle mainBundle] bundleIdentifier], (long)mediaRevision);
                 } else {
+                    if (!success) g_failedMediaRevision = mediaRevision;
                     VCamSetLocalEnabled(NO);
                     NSLog(@"[VCam Pro] No se pudo preparar el medio remoto: %@", error);
                 }
+                // A newer photo/video may have been selected while this revision loaded.
+                VCamRefreshFromServer();
             }];
         } else if (enabled) {
             if (manager.isReady) [manager start];
