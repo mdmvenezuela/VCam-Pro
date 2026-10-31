@@ -160,6 +160,13 @@ static BOOL VCamSendAll(int socketFD, const void *bytes, size_t length) {
     return value;
 }
 
+- (NSString *)mediaPath {
+    [_stateLock lock];
+    NSString *value = [_mediaPath copy];
+    [_stateLock unlock];
+    return value;
+}
+
 - (NSInteger)mediaRevision {
     [_stateLock lock];
     NSInteger value = _mediaRevision;
