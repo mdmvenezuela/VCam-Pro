@@ -854,44 +854,9 @@ static void VCamAttachPreviewOverlay(AVCaptureVideoPreviewLayer *previewLayer) {
 
 %end
 
-// Use one canonical portrait orientation for every AVFoundation client.
-// This changes only the connection's orientation contract; frame rendering,
-// zoom, crop, motion and the panel preview remain untouched.
-%hook AVCaptureConnection
-
-- (void)setVideoOrientation:(AVCaptureVideoOrientation)videoOrientation {
-    if (VCamIsEnabled() && self.isVideoOrientationSupported) {
-        %orig(AVCaptureVideoOrientationPortrait);
-        return;
-    }
-    %orig(videoOrientation);
-}
-
-- (AVCaptureVideoOrientation)videoOrientation {
-    AVCaptureVideoOrientation current = %orig;
-    if (VCamIsEnabled() && self.isVideoOrientationSupported) {
-        return AVCaptureVideoOrientationPortrait;
-    }
-    return current;
-}
-
-%end
-
-%hook AVCaptureSession
-
-- (void)startRunning {
-    %orig;
-    if (!VCamIsEnabled()) return;
-    for (AVCaptureConnection *connection in self.connections) {
-        if (connection.isVideoOrientationSupported &&
-            connection.videoOrientation != AVCaptureVideoOrientationPortrait) {
-            connection.videoOrientation = AVCaptureVideoOrientationPortrait;
-        }
-    }
-}
-
-%end
-
+// Let each AVFoundation client retain its own requested video orientation.
+// The replacement frames are already rendered into the source buffer dimensions;
+// overriding this contract globally makes some clients rotate them a second time.
 %hook AVCaptureVideoPreviewLayer
 
 - (instancetype)initWithSession:(AVCaptureSession *)session {
