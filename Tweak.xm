@@ -1277,6 +1277,7 @@ static NSData *VCamEncodeJPEGAsUTI(NSData *jpegData, NSString *uti) {
     g_vcamZoom = 1.0;
     g_vcamOffsetX = 0.0;
     g_vcamOffsetY = 0.0;
+    g_vcamRotationDegrees = 0;
     [self publishTransform];
 }
 
