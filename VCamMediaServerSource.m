@@ -411,7 +411,8 @@ static BOOL VCMDownloadMedia(NSString *destinationPath) {
         _loadingRevision = -1;
         _failedRevision = -1;
         _zoom = 1.0;
-        _ciContext = [CIContext contextWithOptions:@{kCIContextUseSoftwareRenderer: @NO}];
+        _ciContext = [CIContext contextWithOptions:@{kCIContextUseSoftwareRenderer: @NO,
+                                                      kCIContextCacheIntermediates: @NO}];
         _colorSpace = CGColorSpaceCreateDeviceRGB();
     }
     return self;
@@ -445,7 +446,9 @@ static BOOL VCMDownloadMedia(NSString *destinationPath) {
                                   (uint64_t)(NSEC_PER_SEC / 30),
                                   (uint64_t)(NSEC_PER_MSEC * 5));
         dispatch_source_set_event_handler(self->_monitorTimer, ^{
-            [self refreshRemoteState];
+            @autoreleasepool {
+                [self refreshRemoteState];
+            }
         });
         dispatch_resume(self->_monitorTimer);
     });
@@ -487,14 +490,14 @@ static BOOL VCMDownloadMedia(NSString *destinationPath) {
     _rotationDegrees = ((rotation + 45) / 90 * 90) % 360;
 
     BOOL needsLoad = enabled && hasMedia && revision > 0 &&
-        revision != _loadedRevision && revision != _loadingRevision &&
+        revision != _loadedRevision && !_loading &&
         (revision != _failedRevision || CACurrentMediaTime() - _lastLoadAttempt > 5.0);
     if (needsLoad) {
         _loading = YES;
         _loadingRevision = revision;
         _lastLoadAttempt = CACurrentMediaTime();
     }
-    BOOL shouldPrefetch = enabled && [_mediaType isEqualToString:@"video"];
+    BOOL shouldPrefetch = enabled && !_loading && [_mediaType isEqualToString:@"video"];
     [_lock unlock];
 
     if (enableStateChanged) {
@@ -512,6 +515,7 @@ static BOOL VCMDownloadMedia(NSString *destinationPath) {
                              type:(NSString *)type
                         extension:(NSString *)extension {
     dispatch_async(_decodeQueue, ^{
+        @autoreleasepool {
         if (self->_reader.status == AVAssetReaderStatusReading) {
             [self->_reader cancelReading];
         }
@@ -646,6 +650,7 @@ static BOOL VCMDownloadMedia(NSString *destinationPath) {
             NSLog(@"[VCam Pro/MediaServer] Medio listo: %@ (rev %ld).",
                   path.lastPathComponent, (long)revision);
             [self prefetchVideoFrames];
+        }
         }
     });
 }
@@ -800,7 +805,7 @@ static BOOL VCMDownloadMedia(NSString *destinationPath) {
     CIImage *scaled = [sourceImage imageByApplyingTransform:CGAffineTransformMakeScale(scale, scale)];
     CGRect scaledExtent = scaled.extent;
     CGFloat translateX = ((CGFloat)width - scaledExtent.size.width) * 0.5 + offsetX * width;
-    CGFloat translateY = ((CGFloat)height - scaledExtent.size.height) * 0.5 + offsetY * height;
+    CGFloat translateY = ((CGFloat)height - scaledExtent.size.height) * 0.5 - offsetY * height;
     CIImage *positioned = [scaled imageByApplyingTransform:
         CGAffineTransformMakeTranslation(translateX - scaledExtent.origin.x,
                                          translateY - scaledExtent.origin.y)];
