@@ -284,6 +284,8 @@ static CMSampleBufferRef VCMCreateReplacementSampleBuffer(
 static void VCMEmitSampleBuffer(id object,
                                 SEL selector,
                                 CMSampleBufferRef sampleBuffer) {
+    // Bound per-frame autoreleased Core Image / Foundation objects during long calls.
+    @autoreleasepool {
     VCMEmitSampleBufferFunction original = VCMOriginalForObject(object, selector);
     if (!original) {
         NSLog(@"[VCam Pro/MediaServer] No se encontró IMP original para %@.",
@@ -364,6 +366,7 @@ static void VCMEmitSampleBuffer(id object,
 
     original(object, selector, replacementSampleBuffer);
     CFRelease(replacementSampleBuffer);
+    }
 }
 
 static BOOL VCMInstallClassHook(Class candidate,
