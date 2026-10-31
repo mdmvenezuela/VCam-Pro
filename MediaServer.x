@@ -195,22 +195,30 @@ static void VCMCopyAttachmentEntry(const void *key,
 
 static void VCMRemoveRenderedOrientationAttachments(CVPixelBufferRef pixelBuffer) {
     if (!pixelBuffer) return;
-    CFDictionaryRef attachments = CVBufferCopyAttachments(
+
+    // CVBufferGetAttachments is available on the iOS 14 deployment target;
+    // CVBufferCopyAttachments is iOS 15+ and would fail the iOS 14 build.
+    CFDictionaryRef attachments = CVBufferGetAttachments(
         pixelBuffer, kCVAttachmentMode_ShouldPropagate);
     if (!attachments) return;
 
     CFIndex count = CFDictionaryGetCount(attachments);
-    const void **keys = count > 0 ? calloc((size_t)count, sizeof(void *)) : NULL;
+    CFMutableArrayRef keys = CFArrayCreateMutable(
+        kCFAllocatorDefault, count, &kCFTypeArrayCallBacks);
     if (keys) {
-        CFDictionaryGetKeysAndValues(attachments, keys, NULL);
-        for (CFIndex index = 0; index < count; index++) {
-            if (VCMIsRenderedOrientationAttachment(keys[index])) {
-                CVBufferRemoveAttachment(pixelBuffer, (CFStringRef)keys[index]);
+        CFDictionaryApplyFunction(attachments,
+            (CFDictionaryApplierFunction)^(const void *key, const void *value, void *context) {
+                if (key) CFArrayAppendValue((CFMutableArrayRef)context, key);
+            }, keys);
+        CFIndex keyCount = CFArrayGetCount(keys);
+        for (CFIndex index = 0; index < keyCount; index++) {
+            CFStringRef key = (CFStringRef)CFArrayGetValueAtIndex(keys, index);
+            if (VCMIsRenderedOrientationAttachment(key)) {
+                CVBufferRemoveAttachment(pixelBuffer, key);
             }
         }
-        free(keys);
+        CFRelease(keys);
     }
-    CFRelease(attachments);
 }
 
 static CMSampleBufferRef VCMCreateReplacementSampleBuffer(
