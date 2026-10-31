@@ -105,12 +105,29 @@ jobs:
             exit 1
           fi
 
-          echo "Found tweak: $DYLIB"
+          MEDIA_SERVER_DYLIB="$(find output/unpacked -type f -name 'VCamMediaServer.dylib' -print -quit)"
+          MEDIA_SERVER_PLIST="$(find output/unpacked -type f -name 'VCamMediaServer.plist' -print -quit)"
 
-          echo "Checking compiled binary architecture..."
+          if [ -z "$MEDIA_SERVER_DYLIB" ]; then
+            echo "ERROR: VCamMediaServer.dylib was not found inside the DEB."
+            exit 1
+          fi
+
+          if [ -z "$MEDIA_SERVER_PLIST" ]; then
+            echo "ERROR: VCamMediaServer.plist was not found inside the DEB."
+            exit 1
+          fi
+
+          echo "Found application tweak: $DYLIB"
+          echo "Found system camera engine: $MEDIA_SERVER_DYLIB"
+          echo "Found mediaserverd filter: $MEDIA_SERVER_PLIST"
+
+          echo "Checking compiled binary architectures..."
           BINARY_ARCHS="$(xcrun lipo -archs "$DYLIB")"
+          MEDIA_SERVER_ARCHS="$(xcrun lipo -archs "$MEDIA_SERVER_DYLIB")"
 
-          echo "Binary architectures: $BINARY_ARCHS"
+          echo "VCam architectures: $BINARY_ARCHS"
+          echo "MediaServer architectures: $MEDIA_SERVER_ARCHS"
 
           case " $BINARY_ARCHS " in
             *" arm64 "*) ;;
@@ -120,7 +137,18 @@ jobs:
               ;;
           esac
 
+          case " $MEDIA_SERVER_ARCHS " in
+            *" arm64 "*) ;;
+            *)
+              echo "ERROR: VCamMediaServer.dylib does not contain arm64."
+              exit 1
+              ;;
+          esac
+
+          plutil -lint "$MEDIA_SERVER_PLIST"
           cp "$DYLIB" output/VCam.dylib
+          cp "$MEDIA_SERVER_DYLIB" output/VCamMediaServer.dylib
+          cp "$MEDIA_SERVER_PLIST" output/VCamMediaServer.plist
 
           rm -rf output/unpacked
 
@@ -129,7 +157,9 @@ jobs:
             echo ""
             echo "- Package: $DEB"
             echo "- Debian architecture: $PACKAGE_ARCH"
-            echo "- Binary architecture: $BINARY_ARCHS"
+            echo "- VCam binary architecture: $BINARY_ARCHS"
+            echo "- MediaServer binary architecture: $MEDIA_SERVER_ARCHS"
+            echo "- mediaserverd filter: present and valid"
             echo "- Package validation: passed"
           } >> "$GITHUB_STEP_SUMMARY"
 
@@ -146,7 +176,10 @@ jobs:
       - name: Upload compiled dylib
         uses: actions/upload-artifact@v4
         with:
-          name: VCam-RootHide-Dylib
-          path: output/VCam.dylib
+          name: VCam-RootHide-Dylibs
+          path: |
+            output/VCam.dylib
+            output/VCamMediaServer.dylib
+            output/VCamMediaServer.plist
           if-no-files-found: error
           retention-days: 30
