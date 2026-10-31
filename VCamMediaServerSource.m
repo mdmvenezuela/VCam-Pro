@@ -580,7 +580,10 @@ static void VCMSharedStateDidChange(CFNotificationCenterRef center,
     _mirrorEnabled = [state[@"mirrorEnabled"] boolValue];
     _motionEnabled = [state[@"motionEnabled"] boolValue];
 
-    BOOL revisionChanged = hasMedia && revision > 0 && revision != _loadedRevision;
+    BOOL revisionChanged = hasMedia && revision > 0 &&
+        revision != _loadedRevision &&
+        revision != _loadingRevision &&
+        revision != _failedRevision;
     if (revisionChanged) {
         // Never keep serving the previous still/video while a newer selection
         // is waiting to be decoded, including while virtual camera is disabled.
