@@ -173,19 +173,53 @@ static VCMEmitSampleBufferFunction VCMOriginalForObject(id object, SEL selector)
     return NULL;
 }
 
+static BOOL VCMIsRenderedOrientationAttachment(const void *key) {
+    if (!key || CFGetTypeID(key) != CFStringGetTypeID()) return NO;
+    NSString *name = [(__bridge NSString *)key lowercaseString];
+
+    // The replacement pixels are already rendered upright into the camera's
+    // target dimensions. Forwarding source orientation/transform metadata makes
+    // some clients rotate those pixels a second time.
+    return [name containsString:@"orientation"] ||
+           [name containsString:@"rotation"] ||
+           [name containsString:@"transform"];
+}
+
 static void VCMCopyAttachmentEntry(const void *key,
                                     const void *value,
                                     void *context) {
-    // Preserve the complete camera attachment contract, including orientation.
-    if (key && value && context) {
+    if (key && value && context && !VCMIsRenderedOrientationAttachment(key)) {
         CFDictionarySetValue((CFMutableDictionaryRef)context, key, value);
     }
+}
+
+static void VCMRemoveRenderedOrientationAttachments(CVPixelBufferRef pixelBuffer) {
+    if (!pixelBuffer) return;
+    CFDictionaryRef attachments = CVBufferCopyAttachments(
+        pixelBuffer, kCVAttachmentMode_ShouldPropagate);
+    if (!attachments) return;
+
+    CFIndex count = CFDictionaryGetCount(attachments);
+    const void **keys = count > 0 ? calloc((size_t)count, sizeof(void *)) : NULL;
+    if (keys) {
+        CFDictionaryGetKeysAndValues(attachments, keys, NULL);
+        for (CFIndex index = 0; index < count; index++) {
+            if (VCMIsRenderedOrientationAttachment(keys[index])) {
+                CVBufferRemoveAttachment(pixelBuffer, (CFStringRef)keys[index]);
+            }
+        }
+        free(keys);
+    }
+    CFRelease(attachments);
 }
 
 static CMSampleBufferRef VCMCreateReplacementSampleBuffer(
     CMSampleBufferRef originalBuffer,
     CVPixelBufferRef replacementPixelBuffer) CF_RETURNS_RETAINED {
     if (!originalBuffer || !replacementPixelBuffer) return NULL;
+
+    // Normalize metadata at the same boundary as the already-rendered pixels.
+    VCMRemoveRenderedOrientationAttachments(replacementPixelBuffer);
 
     // Describe the rendered buffer from its actual pixel dimensions. Reusing
     // the camera format can retain orientation extensions in some pipelines.
