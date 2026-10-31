@@ -854,6 +854,40 @@ static void VCamAttachPreviewOverlay(AVCaptureVideoPreviewLayer *previewLayer) {
 
 %end
 
+// AVCaptureConnection can apply an app-specific rotation after the
+// mediaserverd frame hook. Normalize active video connections to one baseline.
+%hook AVCaptureConnection
+
+- (void)setVideoOrientation:(AVCaptureVideoOrientation)videoOrientation {
+    if (VCamIsEnabled() && self.isVideoOrientationSupported) {
+        if (videoOrientation != AVCaptureVideoOrientationLandscapeRight) {
+            NSLog(@"[VCam Pro] Orientación de conexión normalizada (%ld -> LandscapeRight) en %@.",
+                  (long)videoOrientation,
+                  [[NSBundle mainBundle] bundleIdentifier] ?: @"unknown");
+        }
+        %orig(AVCaptureVideoOrientationLandscapeRight);
+        return;
+    }
+    %orig(videoOrientation);
+}
+
+%end
+
+%hook AVCaptureSession
+
+- (void)startRunning {
+    %orig;
+    if (!VCamIsEnabled()) return;
+    for (AVCaptureConnection *connection in self.connections) {
+        if (connection.isVideoOrientationSupported &&
+            connection.videoOrientation != AVCaptureVideoOrientationLandscapeRight) {
+            connection.videoOrientation = AVCaptureVideoOrientationLandscapeRight;
+        }
+    }
+}
+
+%end
+
 %hook AVCaptureVideoPreviewLayer
 
 - (instancetype)initWithSession:(AVCaptureSession *)session {

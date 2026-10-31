@@ -580,7 +580,21 @@ static void VCMSharedStateDidChange(CFNotificationCenterRef center,
     _mirrorEnabled = [state[@"mirrorEnabled"] boolValue];
     _motionEnabled = [state[@"motionEnabled"] boolValue];
 
-    BOOL needsLoad = enabled && hasMedia && revision > 0 &&
+    BOOL revisionChanged = hasMedia && revision > 0 &&
+        revision != _loadedRevision &&
+        revision != _loadingRevision &&
+        revision != _failedRevision;
+    if (revisionChanged) {
+        // Never keep serving the previous still/video while a newer selection
+        // is waiting to be decoded, including while virtual camera is disabled.
+        _stillImage = nil;
+        [_videoFrames removeAllObjects];
+        _lastVideoFrame = nil;
+        _loadedRevision = -1;
+        _failedRevision = -1;
+    }
+
+    BOOL needsLoad = hasMedia && revision > 0 &&
         revision != _loadedRevision && !_loading &&
         (revision != _failedRevision || CACurrentMediaTime() - _lastLoadAttempt > 5.0);
     if (needsLoad) {
