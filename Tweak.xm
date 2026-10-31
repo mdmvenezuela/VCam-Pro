@@ -1003,6 +1003,7 @@ static NSData *VCamEncodeJPEGAsUTI(NSData *jpegData, NSString *uti) {
 
 @interface VCamPassthroughWindow : UIWindow
 @property (nonatomic, weak) UIButton *vcamButton;
+@property (nonatomic, weak) UIView *interactivePanel;
 @end
 
 @implementation VCamPassthroughWindow
@@ -1017,6 +1018,9 @@ static NSData *VCamEncodeJPEGAsUTI(NSData *jpegData, NSString *uti) {
 
     UIButton *button = self.vcamButton;
     if (button && (hit == button || [hit isDescendantOfView:button])) return hit;
+
+    UIView *panel = self.interactivePanel;
+    if (panel && (hit == panel || [hit isDescendantOfView:panel])) return hit;
     return nil;
 }
 
@@ -1474,6 +1478,15 @@ static NSString *VCamEngineStatusExplanation(NSString *status) {
     if ([status isEqualToString:@"hook_active_no_frame"]) {
         return @"El hook está recibiendo fotogramas de cámara, pero el motor todavía no consigue renderizar el medio virtual.";
     }
+    if ([status isEqualToString:@"enabled"]) {
+        return @"Cámara virtual activada. El motor debe continuar sustituyendo fotogramas.";
+    }
+    if ([status isEqualToString:@"disabled"]) {
+        return @"Cámara virtual desactivada. El motor debe volver a entregar los fotogramas de la cámara física.";
+    }
+    if ([status isEqualToString:@"sample_buffer_create_failed"]) {
+        return @"Los píxeles virtuales se generaron, pero CoreMedia no pudo crear una muestra compatible para la salida de cámara.";
+    }
     if ([status isEqualToString:@"frames_replaced"]) {
         return @"VCam está sustituyendo fotogramas reales por el medio seleccionado.";
     }
@@ -1540,21 +1553,21 @@ static void VCamShowMenu(void) {
     [menu addAction:[UIAlertAction actionWithTitle:toggleTitle
                                              style:UIAlertActionStyleDefault
                                            handler:^(UIAlertAction *action) {
-        g_vcamEnabled = !g_vcamEnabled;
+        BOOL nextEnabled = !VCamIsEnabled();
+        VCamSetLocalEnabled(nextEnabled);
+        VCamSetPreviewOverlaysVisible(nextEnabled);
         VCamUpdateButton();
         [[MediaManager sharedManager] setZoom:g_vcamZoom offsetX:g_vcamOffsetX offsetY:g_vcamOffsetY];
-        if (g_vcamEnabled) [[MediaManager sharedManager] start];
+        if (nextEnabled) [[MediaManager sharedManager] start];
         else [[MediaManager sharedManager] stop];
-        VCamPostControlAsync(@{@"enabled": @(g_vcamEnabled)});
+        VCamPostControlAsync(@{@"enabled": @(nextEnabled)});
     }]];
 
-    [menu addAction:[UIAlertAction actionWithTitle:@"Posición y zoom"
+    [menu addAction:[UIAlertAction actionWithTitle:@"Vista previa y encuadre"
                                              style:UIAlertActionStyleDefault
                                            handler:^(UIAlertAction *action) {
         dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.2 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
-            VCamAdjustmentViewController *controller = [[VCamAdjustmentViewController alloc] init];
-            controller.modalPresentationStyle = UIModalPresentationFormSheet;
-            [g_overlayController presentViewController:controller animated:YES completion:nil];
+            VCamShowAdjustmentPanel();
         });
     }]];
 
