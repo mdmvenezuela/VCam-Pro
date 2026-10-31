@@ -49,6 +49,7 @@ static BOOL VCamSendAll(int socketFD, const void *bytes, size_t length) {
     CGFloat _zoom;
     CGFloat _offsetX;
     CGFloat _offsetY;
+    NSInteger _rotationDegrees;
     CGFloat _buttonX;
     CGFloat _buttonY;
     NSString *_engineStatus;
@@ -87,6 +88,7 @@ static BOOL VCamSendAll(int socketFD, const void *bytes, size_t length) {
         _clientQueue = dispatch_queue_create("com.vcam.pro.ipc.clients", DISPATCH_QUEUE_CONCURRENT);
         _serverFD = -1;
         _zoom = 1.0;
+        _rotationDegrees = 0;
         _buttonX = 0.92;
         _buttonY = 0.24;
         _mediaRevision = 0;
@@ -108,6 +110,8 @@ static BOOL VCamSendAll(int socketFD, const void *bytes, size_t length) {
             _zoom = MAX(0.5, MIN(4.0, [saved[@"zoom"] doubleValue] ?: 1.0));
             _offsetX = MAX(-1.0, MIN(1.0, [saved[@"offsetX"] doubleValue]));
             _offsetY = MAX(-1.0, MIN(1.0, [saved[@"offsetY"] doubleValue]));
+            _rotationDegrees = (([saved[@"rotationDegrees"] integerValue] % 360) + 360) % 360;
+            _rotationDegrees = ((_rotationDegrees + 45) / 90 * 90) % 360;
             _buttonX = MAX(0.04, MIN(0.96, [saved[@"buttonX"] doubleValue] ?: 0.92));
             _buttonY = MAX(0.04, MIN(0.96, [saved[@"buttonY"] doubleValue] ?: 0.24));
         }
@@ -202,6 +206,13 @@ static BOOL VCamSendAll(int socketFD, const void *bytes, size_t length) {
     return value;
 }
 
+- (NSInteger)rotationDegrees {
+    [_stateLock lock];
+    NSInteger value = _rotationDegrees;
+    [_stateLock unlock];
+    return value;
+}
+
 - (CGFloat)buttonX {
     [_stateLock lock];
     CGFloat value = _buttonX;
@@ -227,6 +238,7 @@ static BOOL VCamSendAll(int socketFD, const void *bytes, size_t length) {
         @"zoom": @(_zoom),
         @"offsetX": @(_offsetX),
         @"offsetY": @(_offsetY),
+        @"rotationDegrees": @(_rotationDegrees),
         @"buttonX": @(_buttonX),
         @"buttonY": @(_buttonY),
         @"engineStatus": _engineStatus ?: @"not_reported",
@@ -355,6 +367,24 @@ static BOOL VCamSendAll(int socketFD, const void *bytes, size_t length) {
     [self publishChange];
 }
 
+- (void)setTransformWithZoom:(CGFloat)zoom
+                    offsetX:(CGFloat)offsetX
+                    offsetY:(CGFloat)offsetY
+            rotationDegrees:(NSInteger)rotationDegrees {
+    NSInteger normalizedRotation = ((rotationDegrees % 360) + 360) % 360;
+    normalizedRotation = ((normalizedRotation + 45) / 90 * 90) % 360;
+
+    [_stateLock lock];
+    _zoom = MAX(0.5, MIN(4.0, isfinite(zoom) ? zoom : 1.0));
+    _offsetX = MAX(-1.0, MIN(1.0, isfinite(offsetX) ? offsetX : 0.0));
+    _offsetY = MAX(-1.0, MIN(1.0, isfinite(offsetY) ? offsetY : 0.0));
+    _rotationDegrees = normalizedRotation;
+    _stateRevision += 1;
+    [self persistLocked];
+    [_stateLock unlock];
+    [self publishChange];
+}
+
 - (void)adjustOffsetX:(CGFloat)deltaX offsetY:(CGFloat)deltaY {
     [_stateLock lock];
     _offsetX = MAX(-1.0, MIN(1.0, _offsetX + deltaX));
@@ -465,6 +495,7 @@ static BOOL VCamSendAll(int socketFD, const void *bytes, size_t length) {
     NSNumber *zoom = control[@"zoom"];
     NSNumber *offsetX = control[@"offsetX"];
     NSNumber *offsetY = control[@"offsetY"];
+    NSNumber *rotationDegrees = control[@"rotationDegrees"];
     NSNumber *buttonX = control[@"buttonX"];
     NSNumber *buttonY = control[@"buttonY"];
 
@@ -477,6 +508,10 @@ static BOOL VCamSendAll(int socketFD, const void *bytes, size_t length) {
     }
     if ([offsetY isKindOfClass:[NSNumber class]] && isfinite(offsetY.doubleValue)) {
         _offsetY = MAX(-1.0, MIN(1.0, offsetY.doubleValue));
+    }
+    if ([rotationDegrees isKindOfClass:[NSNumber class]]) {
+        NSInteger normalized = ((rotationDegrees.integerValue % 360) + 360) % 360;
+        _rotationDegrees = ((normalized + 45) / 90 * 90) % 360;
     }
     if ([buttonX isKindOfClass:[NSNumber class]] && isfinite(buttonX.doubleValue)) {
         _buttonX = MAX(0.04, MIN(0.96, buttonX.doubleValue));
