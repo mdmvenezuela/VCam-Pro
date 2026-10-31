@@ -353,6 +353,9 @@ static BOOL VCMDownloadMedia(NSString *destinationPath) {
 
     BOOL _enabled;
     BOOL _loading;
+    BOOL _hasReportedEnableState;
+    BOOL _reportedEnabled;
+    CGAffineTransform _preferredTransform;
     NSInteger _loadedRevision;
     NSInteger _loadingRevision;
     NSInteger _failedRevision;
@@ -430,8 +433,8 @@ static BOOL VCMDownloadMedia(NSString *destinationPath) {
                                                      self->_monitorQueue);
         dispatch_source_set_timer(self->_monitorTimer,
                                   dispatch_time(DISPATCH_TIME_NOW, 0),
-                                  (uint64_t)(NSEC_PER_SEC / 2),
-                                  (uint64_t)(NSEC_PER_MSEC * 40));
+                                  (uint64_t)(NSEC_PER_SEC / 10),
+                                  (uint64_t)(NSEC_PER_MSEC * 20));
         dispatch_source_set_event_handler(self->_monitorTimer, ^{
             [self refreshRemoteState];
         });
@@ -460,7 +463,14 @@ static BOOL VCMDownloadMedia(NSString *destinationPath) {
         ? state[@"mediaExtension"] : @"mp4";
 
     [_lock lock];
+    BOOL enableStateChanged = !_hasReportedEnableState || _reportedEnabled != enabled;
+    _hasReportedEnableState = YES;
+    _reportedEnabled = enabled;
     _enabled = enabled;
+    if (!enabled) {
+        [_videoFrames removeAllObjects];
+        _lastVideoFrame = nil;
+    }
     _zoom = MAX(0.5, MIN(4.0, [state[@"zoom"] doubleValue]));
     _offsetX = MAX(-1.0, MIN(1.0, [state[@"offsetX"] doubleValue]));
     _offsetY = MAX(-1.0, MIN(1.0, [state[@"offsetY"] doubleValue]));
@@ -473,10 +483,17 @@ static BOOL VCMDownloadMedia(NSString *destinationPath) {
         _loadingRevision = revision;
         _lastLoadAttempt = CACurrentMediaTime();
     }
+    BOOL shouldPrefetch = enabled && [_mediaType isEqualToString:@"video"];
     [_lock unlock];
 
+    if (enableStateChanged) {
+        VCMReportEngineStatus(enabled ? @"enabled" : @"disabled",
+            enabled ? @"La cámara virtual está activada." : @"Cámara virtual desactivada: se debe entregar nuevamente el fotograma físico.");
+    }
     if (needsLoad) {
         [self beginMediaLoadForRevision:revision type:type extension:extension];
+    } else if (shouldPrefetch) {
+        [self prefetchVideoFrames];
     }
 }
 
@@ -517,16 +534,32 @@ static BOOL VCMDownloadMedia(NSString *destinationPath) {
         if ([type isEqualToString:@"image"]) {
             NSURL *url = [NSURL fileURLWithPath:path];
             CGImageSourceRef imageSource = CGImageSourceCreateWithURL((__bridge CFURLRef)url, NULL);
+            NSDictionary *imageProperties = imageSource
+                ? CFBridgingRelease(CGImageSourceCopyPropertiesAtIndex(imageSource, 0, NULL))
+                : nil;
             CGImageRef image = imageSource ? CGImageSourceCreateImageAtIndex(imageSource, 0, NULL) : NULL;
             if (imageSource) CFRelease(imageSource);
 
             if (image) {
                 CIImage *still = [CIImage imageWithCGImage:image];
                 CGImageRelease(image);
+                NSNumber *orientationValue = [imageProperties[(id)kCGImagePropertyOrientation] isKindOfClass:[NSNumber class]]
+                    ? imageProperties[(id)kCGImagePropertyOrientation] : nil;
+                if (orientationValue) {
+                    NSInteger orientation = MAX(1, MIN(8, orientationValue.integerValue));
+                    still = [still imageByApplyingOrientation:(CGImagePropertyOrientation)orientation];
+                }
+                CGRect stillExtent = still.extent;
+                if (!CGRectIsEmpty(stillExtent) &&
+                    (stillExtent.origin.x != 0.0 || stillExtent.origin.y != 0.0)) {
+                    still = [still imageByApplyingTransform:
+                        CGAffineTransformMakeTranslation(-stillExtent.origin.x, -stillExtent.origin.y)];
+                }
                 [self->_lock lock];
                 self->_stillImage = still;
                 self->_asset = nil;
                 self->_videoTrack = nil;
+                self->_preferredTransform = CGAffineTransformIdentity;
                 self->_reader = nil;
                 self->_readerOutput = nil;
                 [self->_videoFrames removeAllObjects];
@@ -568,6 +601,7 @@ static BOOL VCMDownloadMedia(NSString *destinationPath) {
                         self->_stillImage = nil;
                         self->_asset = asset;
                         self->_videoTrack = track;
+                        self->_preferredTransform = track.preferredTransform;
                         self->_reader = reader;
                         self->_readerOutput = output;
                         [self->_videoFrames removeAllObjects];
@@ -616,11 +650,12 @@ static BOOL VCMDownloadMedia(NSString *destinationPath) {
             NSUInteger attempts = 0;
             while (attempts < 12) {
                 [self->_lock lock];
+                BOOL enabled = self->_enabled;
                 BOOL videoMode = [self->_mediaType isEqualToString:@"video"];
                 NSUInteger queued = self->_videoFrames.count;
                 [self->_lock unlock];
 
-                if (!videoMode || queued >= 4) break;
+                if (!enabled || !videoMode || queued >= 4) break;
 
                 CMSampleBufferRef sample = [self->_readerOutput copyNextSampleBuffer];
                 if (!sample) {
@@ -666,20 +701,21 @@ static BOOL VCMDownloadMedia(NSString *destinationPath) {
     });
 }
 
-- (BOOL)renderNextFrameIntoPixelBuffer:(CVPixelBufferRef)targetBuffer {
-    if (!targetBuffer) return NO;
+- (CVPixelBufferRef)copyReplacementPixelBufferMatching:(CVPixelBufferRef)templateBuffer {
+    if (!templateBuffer) return NULL;
 
-    OSType pixelFormat = CVPixelBufferGetPixelFormatType(targetBuffer);
+    OSType pixelFormat = CVPixelBufferGetPixelFormatType(templateBuffer);
     BOOL supportedFormat =
         pixelFormat == kCVPixelFormatType_32BGRA ||
         pixelFormat == kCVPixelFormatType_32ARGB ||
         pixelFormat == kCVPixelFormatType_420YpCbCr8BiPlanarVideoRange ||
         pixelFormat == kCVPixelFormatType_420YpCbCr8BiPlanarFullRange;
-    if (!supportedFormat) return NO;
+    if (!supportedFormat) return NULL;
 
     CIImage *sourceImage = nil;
     VCMVideoFrame *frameToRender = nil;
     BOOL videoMode = NO;
+    CGAffineTransform preferredTransform = CGAffineTransformIdentity;
 
     [_lock lock];
     BOOL active = _enabled && !_loading;
@@ -687,6 +723,7 @@ static BOOL VCMDownloadMedia(NSString *destinationPath) {
         sourceImage = _stillImage;
     } else if (active && [_mediaType isEqualToString:@"video"]) {
         videoMode = YES;
+        preferredTransform = _preferredTransform;
         if (_videoFrames.count > 0) {
             frameToRender = _videoFrames.firstObject;
             [_videoFrames removeObjectAtIndex:0];
@@ -702,15 +739,27 @@ static BOOL VCMDownloadMedia(NSString *destinationPath) {
 
     if (frameToRender.pixelBuffer) {
         sourceImage = [CIImage imageWithCVPixelBuffer:frameToRender.pixelBuffer];
+        if (sourceImage && !CGAffineTransformIsIdentity(preferredTransform)) {
+            sourceImage = [sourceImage imageByApplyingTransform:preferredTransform];
+        }
+        if (sourceImage) {
+            CGRect transformedExtent = sourceImage.extent;
+            if (!CGRectIsEmpty(transformedExtent) &&
+                (transformedExtent.origin.x != 0.0 || transformedExtent.origin.y != 0.0)) {
+                sourceImage = [sourceImage imageByApplyingTransform:
+                    CGAffineTransformMakeTranslation(-transformedExtent.origin.x,
+                                                     -transformedExtent.origin.y)];
+            }
+        }
     }
-    if (!sourceImage) return NO;
+    if (!sourceImage) return NULL;
 
-    size_t width = CVPixelBufferGetWidth(targetBuffer);
-    size_t height = CVPixelBufferGetHeight(targetBuffer);
+    size_t width = CVPixelBufferGetWidth(templateBuffer);
+    size_t height = CVPixelBufferGetHeight(templateBuffer);
     CGRect sourceExtent = sourceImage.extent;
     if (width == 0 || height == 0 ||
         CGRectIsEmpty(sourceExtent) || sourceExtent.size.width <= 0 || sourceExtent.size.height <= 0) {
-        return NO;
+        return NULL;
     }
 
     CGFloat scale = MAX((CGFloat)width / sourceExtent.size.width,
@@ -725,28 +774,45 @@ static BOOL VCMDownloadMedia(NSString *destinationPath) {
     CGRect targetBounds = CGRectMake(0, 0, width, height);
     CIImage *cropped = [positioned imageByCroppingToRect:targetBounds];
 
+    NSDictionary *attributes = @{
+        (id)kCVPixelBufferIOSurfacePropertiesKey: @{},
+        (id)kCVPixelBufferCGImageCompatibilityKey: @YES,
+        (id)kCVPixelBufferCGBitmapContextCompatibilityKey: @YES
+    };
+    CVPixelBufferRef replacementBuffer = NULL;
+    CVReturn allocationStatus = CVPixelBufferCreate(kCFAllocatorDefault,
+                                                       width,
+                                                       height,
+                                                       pixelFormat,
+                                                       (__bridge CFDictionaryRef)attributes,
+                                                       &replacementBuffer);
+    if (allocationStatus != kCVReturnSuccess || !replacementBuffer) {
+        NSLog(@"[VCam Pro/MediaServer] No se pudo reservar un pixel buffer de reemplazo (%d).",
+              allocationStatus);
+        return NULL;
+    }
+
+    CVBufferPropagateAttachments(templateBuffer, replacementBuffer);
     @try {
         [_ciContext render:cropped
-           toCVPixelBuffer:targetBuffer
+           toCVPixelBuffer:replacementBuffer
                     bounds:targetBounds
                 colorSpace:_colorSpace];
     } @catch (NSException *exception) {
         NSLog(@"[VCam Pro/MediaServer] Error renderizando fotograma: %@", exception);
-        return NO;
+        CVPixelBufferRelease(replacementBuffer);
+        return NULL;
     }
-
-    CVBufferSetAttachment(targetBuffer,
-                          (__bridge CFStringRef)kVCamSystemReplacementAttachment,
-                          kCFBooleanTrue,
-                          kCVAttachmentMode_ShouldPropagate);
 
     if (videoMode) {
         [_lock lock];
         NSUInteger queued = _videoFrames.count;
+        BOOL stillEnabled = _enabled;
         [_lock unlock];
-        if (queued < 3) [self prefetchVideoFrames];
+        if (stillEnabled && queued < 3) [self prefetchVideoFrames];
     }
-    return YES;
+
+    return replacementBuffer;
 }
 
 @end
