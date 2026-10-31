@@ -1568,20 +1568,20 @@ static UIImage *VCamCreateOrientationNormalizedImage(UIImage *image) {
 
     NSURL *videoURL = info[UIImagePickerControllerMediaURL];
     if (videoURL) {
-        BOOL didStartAccess = NO;
-        if ([videoURL respondsToSelector:@selector(startAccessingSecurityScopedResource)]) {
-            didStartAccess = [videoURL startAccessingSecurityScopedResource];
-        }
-        NSString *path = videoURL.path;
-        NSString *extension = videoURL.pathExtension.length ? videoURL.pathExtension : @"mp4";
-
         dispatch_async(dispatch_get_global_queue(QOS_CLASS_USER_INITIATED, 0), ^{
-            BOOL uploaded = VCamHTTPUploadFile(path, @"video", extension);
-            if (didStartAccess) [videoURL stopAccessingSecurityScopedResource];
+            NSError *importError = nil;
+            BOOL imported = [[VCamSharedState sharedState] importVideoAtURL:videoURL error:&importError];
             dispatch_async(dispatch_get_main_queue(), ^{
                 [picker dismissViewControllerAnimated:YES completion:^{
-                    if (uploaded) VCamRefreshFromServer();
-                    else NSLog(@"[VCam Pro] No se pudo enviar el vídeo al proceso central.");
+                    if (imported) {
+                        VCamRefreshFromServer();
+                        if (g_adjustmentPanel) {
+                            g_adjustmentPreviewRevision = [VCamSharedState sharedState].mediaRevision;
+                            [g_adjustmentPanel reloadPreview];
+                        }
+                    } else {
+                        NSLog(@"[VCam Pro] No se pudo importar el vídeo seleccionado: %@", importError);
+                    }
                 }];
             });
         });
@@ -1589,6 +1589,7 @@ static UIImage *VCamCreateOrientationNormalizedImage(UIImage *image) {
     }
 
     UIImage *image = info[UIImagePickerControllerOriginalImage];
+    if (!image) image = info[UIImagePickerControllerEditedImage];
     if (!image) {
         NSURL *imageURL = info[UIImagePickerControllerImageURL];
         if (imageURL) {
@@ -1614,29 +1615,26 @@ static UIImage *VCamCreateOrientationNormalizedImage(UIImage *image) {
     }
 
     UIImage *normalizedImage = image ? VCamCreateOrientationNormalizedImage(image) : nil;
-    NSData *jpeg = normalizedImage ? UIImageJPEGRepresentation(normalizedImage, 0.94) : nil;
-    if (!jpeg) {
+    if (!normalizedImage.CGImage) {
         NSLog(@"[VCam Pro] No se pudo obtener o convertir la imagen seleccionada.");
         [picker dismissViewControllerAnimated:YES completion:nil];
         return;
     }
 
-    NSString *temporaryPath = [NSTemporaryDirectory() stringByAppendingPathComponent:
-        [NSString stringWithFormat:@"vcam_upload_%@.jpg", NSUUID.UUID.UUIDString]];
-    NSError *writeError = nil;
-    if (![jpeg writeToFile:temporaryPath options:NSDataWritingAtomic error:&writeError]) {
-        NSLog(@"[VCam Pro] No se pudo guardar temporalmente la imagen: %@", writeError);
-        [picker dismissViewControllerAnimated:YES completion:nil];
-        return;
-    }
-
     dispatch_async(dispatch_get_global_queue(QOS_CLASS_USER_INITIATED, 0), ^{
-        BOOL uploaded = VCamHTTPUploadFile(temporaryPath, @"image", @"jpg");
-        unlink(temporaryPath.fileSystemRepresentation);
+        NSError *importError = nil;
+        BOOL imported = [[VCamSharedState sharedState] importImage:normalizedImage error:&importError];
         dispatch_async(dispatch_get_main_queue(), ^{
             [picker dismissViewControllerAnimated:YES completion:^{
-                if (uploaded) VCamRefreshFromServer();
-                else NSLog(@"[VCam Pro] No se pudo enviar la imagen al proceso central.");
+                if (imported) {
+                    VCamRefreshFromServer();
+                    if (g_adjustmentPanel) {
+                        g_adjustmentPreviewRevision = [VCamSharedState sharedState].mediaRevision;
+                        [g_adjustmentPanel reloadPreview];
+                    }
+                } else {
+                    NSLog(@"[VCam Pro] No se pudo importar la imagen seleccionada: %@", importError);
+                }
             }];
         });
     });
