@@ -386,7 +386,9 @@ static BOOL VCMDownloadMedia(NSString *destinationPath, NSInteger revision) {
     size_t _poolHeight;
     OSType _poolPixelFormat;
     NSUInteger _poolExhaustionCount;
+    BOOL _observingSharedState;
 }
+- (void)handleSharedStateNotification;
 - (CVPixelBufferRef)newReplacementPixelBufferWithWidth:(size_t)width
                                                  height:(size_t)height
                                             pixelFormat:(OSType)pixelFormat;
@@ -396,6 +398,15 @@ static BOOL VCMDownloadMedia(NSString *destinationPath, NSInteger revision) {
                         extension:(NSString *)extension;
 - (void)prefetchVideoFrames;
 @end
+
+static void VCMSharedStateDidChange(CFNotificationCenterRef center,
+                                    void *observer,
+                                    CFStringRef name,
+                                    const void *object,
+                                    CFDictionaryRef userInfo) {
+    VCamMediaServerSource *source = (__bridge VCamMediaServerSource *)observer;
+    [source handleSharedStateNotification];
+}
 
 @implementation VCamMediaServerSource
 
@@ -429,6 +440,13 @@ static BOOL VCMDownloadMedia(NSString *destinationPath, NSInteger revision) {
 }
 
 - (void)dealloc {
+    if (_observingSharedState) {
+        CFNotificationCenterRemoveObserver(CFNotificationCenterGetDarwinNotifyCenter(),
+                                           (__bridge const void *)self,
+                                           CFSTR("com.vcam.pro.state.changed"),
+                                           NULL);
+        _observingSharedState = NO;
+    }
     if (_monitorTimer) dispatch_source_cancel(_monitorTimer);
     if (_colorSpace) CGColorSpaceRelease(_colorSpace);
     if (_replacementBufferPool) {
@@ -449,6 +467,15 @@ static BOOL VCMDownloadMedia(NSString *destinationPath, NSInteger revision) {
 
 - (void)startMonitoring {
     dispatch_async(_monitorQueue, ^{
+        if (!self->_observingSharedState) {
+            CFNotificationCenterAddObserver(CFNotificationCenterGetDarwinNotifyCenter(),
+                                            (__bridge const void *)self,
+                                            VCMSharedStateDidChange,
+                                            CFSTR("com.vcam.pro.state.changed"),
+                                            NULL,
+                                            CFNotificationSuspensionBehaviorDeliverImmediately);
+            self->_observingSharedState = YES;
+        }
         if (self->_monitorTimer) return;
         [self refreshRemoteState];
 
@@ -466,6 +493,14 @@ static BOOL VCMDownloadMedia(NSString *destinationPath, NSInteger revision) {
             }
         });
         dispatch_resume(self->_monitorTimer);
+    });
+}
+
+- (void)handleSharedStateNotification {
+    dispatch_async(_monitorQueue, ^{
+        @autoreleasepool {
+            [self refreshRemoteState];
+        }
     });
 }
 
@@ -557,6 +592,32 @@ static BOOL VCMDownloadMedia(NSString *destinationPath, NSInteger revision) {
             NSLog(@"[VCam Pro/MediaServer] No se pudo descargar el medio desde SpringBoard.");
             VCMReportEngineStatus(@"media_download_failed",
                 @"mediaserverd no pudo descargar el archivo seleccionado desde SpringBoard.");
+            [self refreshRemoteState];
+            return;
+        }
+
+        // A selection can change while this revision is downloading. Never
+        // let an older file become the live camera source after a newer choice.
+        NSData *latestStateData = VCMFetchSmallResponse(@"/state");
+        NSInteger latestRevision = revision;
+        if (latestStateData.length > 0) {
+            NSError *latestStateError = nil;
+            id latestStateObject = [NSJSONSerialization JSONObjectWithData:latestStateData
+                                                                    options:0
+                                                                      error:&latestStateError];
+            if ([latestStateObject isKindOfClass:[NSDictionary class]]) {
+                latestRevision = [latestStateObject[@"mediaRevision"] integerValue];
+            }
+        }
+        if (latestRevision != revision) {
+            [self->_lock lock];
+            self->_loading = NO;
+            self->_loadingRevision = -1;
+            self->_failedRevision = -1;
+            [self->_lock unlock];
+            NSLog(@"[VCam Pro/MediaServer] Revisión %ld descartada; la selección actual ya es %ld.",
+                  (long)revision, (long)latestRevision);
+            [self refreshRemoteState];
             return;
         }
 
@@ -666,6 +727,9 @@ static BOOL VCMDownloadMedia(NSString *destinationPath, NSInteger revision) {
                   path.lastPathComponent, (long)revision);
             [self prefetchVideoFrames];
         }
+        // Re-check immediately so a revision selected mid-load is applied
+        // without waiting for the periodic monitor or reopening the app.
+        [self refreshRemoteState];
         }
     });
 }
