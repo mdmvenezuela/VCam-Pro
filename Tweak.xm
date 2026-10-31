@@ -4,6 +4,7 @@
 #import <CoreVideo/CoreVideo.h>
 #import <CoreImage/CoreImage.h>
 #import <ImageIO/ImageIO.h>
+#import <QuartzCore/QuartzCore.h>
 #import <objc/runtime.h>
 #import <arpa/inet.h>
 #import <errno.h>
@@ -51,6 +52,8 @@ static NSString *g_localMediaPath = nil;
 static NSString *g_localMediaType = nil;
 static NSHashTable<CALayer *> *g_previewOverlayLayers = nil;
 static CIContext *g_previewCIContext = nil;
+static dispatch_source_t g_previewPumpTimer = nil;
+static CFTimeInterval g_lastVideoOutputCallbackTime = 0.0;
 static const void *kVCamPreviewOverlayKey = &kVCamPreviewOverlayKey;
 
 static void VCamAttachPreviewOverlay(AVCaptureVideoPreviewLayer *previewLayer);
@@ -554,6 +557,78 @@ static void VCamUpdatePreviewOverlaysWithJPEG(NSData *jpegData) {
     if (image.CGImage) VCamSetPreviewOverlayContents(image.CGImage);
 }
 
+static void VCamStartPreviewPump(void);
+
+static void VCamRenderPixelBufferToPreview(CVPixelBufferRef pixelBuffer) {
+    if (!pixelBuffer) return;
+
+    static dispatch_once_t onceToken;
+    dispatch_once(&onceToken, ^{
+        g_previewCIContext = [CIContext contextWithOptions:@{kCIContextUseSoftwareRenderer: @NO}];
+    });
+
+    CIImage *image = [CIImage imageWithCVPixelBuffer:pixelBuffer];
+    CGRect extent = image.extent;
+    if (CGRectIsEmpty(extent) || extent.size.width < 2.0 || extent.size.height < 2.0) return;
+
+    CGImageRef cgImage = [g_previewCIContext createCGImage:image fromRect:extent];
+    if (!cgImage) return;
+    VCamSetPreviewOverlayContents(cgImage);
+    CGImageRelease(cgImage);
+}
+
+static void VCamPreviewPumpTick(void) {
+    if (!VCamIsEnabled() || ![MediaManager sharedManager].isReady) return;
+    if (g_previewOverlayLayers.allObjects.count == 0) return;
+
+    MediaManager *manager = [MediaManager sharedManager];
+    if (manager.mode == VCamMediaModePhoto) {
+        NSData *jpeg = [manager nextPhotoData];
+        if (jpeg.length) VCamUpdatePreviewOverlaysWithJPEG(jpeg);
+        return;
+    }
+
+    if (manager.mode != VCamMediaModeVideo) return;
+
+    CFTimeInterval now = CACurrentMediaTime();
+    BOOL dataOutputIsFeedingPreview = NO;
+    @synchronized ([AVCaptureVideoDataOutput class]) {
+        dataOutputIsFeedingPreview =
+            (g_lastVideoOutputCallbackTime > 0.0 &&
+             (now - g_lastVideoOutputCallbackTime) < 0.5);
+    }
+
+    // If AVFoundation is already delivering virtual frames through the
+    // video-data delegate, let that callback drive the preview. Only pump
+    // the media reader when the app uses a preview layer without a data output.
+    if (dataOutputIsFeedingPreview) return;
+
+    CMSampleBufferRef frame =
+        [manager nextVideoFrameForSize:CGSizeMake(640, 480)
+                           pixelFormat:kCVPixelFormatType_32BGRA];
+    if (!frame) return;
+
+    VCamRenderPixelBufferToPreview(CMSampleBufferGetImageBuffer(frame));
+    CFRelease(frame);
+}
+
+static void VCamStartPreviewPump(void) {
+    if (g_previewPumpTimer) return;
+
+    dispatch_queue_t queue = dispatch_get_main_queue();
+    g_previewPumpTimer = dispatch_source_create(DISPATCH_SOURCE_TYPE_TIMER, 0, 0, queue);
+    if (!g_previewPumpTimer) return;
+
+    dispatch_source_set_timer(g_previewPumpTimer,
+                              dispatch_time(DISPATCH_TIME_NOW, 0),
+                              (uint64_t)(NSEC_PER_SEC / 30),
+                              (uint64_t)(NSEC_PER_MSEC * 3));
+    dispatch_source_set_event_handler(g_previewPumpTimer, ^{
+        VCamPreviewPumpTick();
+    });
+    dispatch_resume(g_previewPumpTimer);
+}
+
 static void VCamAttachPreviewOverlay(AVCaptureVideoPreviewLayer *previewLayer) {
     if (!previewLayer) return;
     dispatch_async(dispatch_get_main_queue(), ^{
@@ -585,6 +660,7 @@ static void VCamAttachPreviewOverlay(AVCaptureVideoPreviewLayer *previewLayer) {
             NSData *stillJPEG = [[MediaManager sharedManager] nextPhotoData];
             if (stillJPEG) VCamUpdatePreviewOverlaysWithJPEG(stillJPEG);
         }
+        VCamStartPreviewPump();
     });
 }
 
@@ -615,6 +691,10 @@ static void VCamAttachPreviewOverlay(AVCaptureVideoPreviewLayer *previewLayer) {
 - (void)captureOutput:(AVCaptureOutput *)output
  didOutputSampleBuffer:(CMSampleBufferRef)sampleBuffer
        fromConnection:(AVCaptureConnection *)connection {
+
+    @synchronized ([AVCaptureVideoDataOutput class]) {
+        g_lastVideoOutputCallbackTime = CACurrentMediaTime();
+    }
 
     id<AVCaptureVideoDataOutputSampleBufferDelegate> delegate = self.originalDelegate;
     if (!delegate) {
