@@ -8,6 +8,12 @@
 #import <stdatomic.h>
 #import <stdint.h>
 #import <string.h>
+#import <arpa/inet.h>
+#import <netinet/in.h>
+#import <sys/socket.h>
+#import <sys/time.h>
+#import <unistd.h>
+#import <errno.h>
 
 #import "VCamMediaServerSource.h"
 
@@ -28,6 +34,83 @@ static _Atomic(uint32_t) g_vcmReplacementCount = 0;
 static dispatch_queue_t g_vcmInstallQueue;
 static _Atomic(uint32_t) g_vcmInstallQueued = 0;
 static NSLock *g_vcmHookLock;
+static dispatch_queue_t g_vcmStatusQueue;
+static NSString *g_vcmLastReportedStatus;
+static uint32_t g_vcmLastReportedFrames = 0;
+static _Atomic(uint32_t) g_vcmUnreplacedCount = 0;
+static const uint16_t kVCMStatusPort = 47831;
+
+static BOOL VCMSendStatusBytes(int fd, const void *bytes, size_t length) {
+    const uint8_t *cursor = (const uint8_t *)bytes;
+    size_t sent = 0;
+    while (sent < length) {
+        ssize_t amount = send(fd, cursor + sent, length - sent, 0);
+        if (amount < 0) {
+            if (errno == EINTR) continue;
+            return NO;
+        }
+        if (amount == 0) return NO;
+        sent += (size_t)amount;
+    }
+    return YES;
+}
+
+void VCMReportEngineStatus(NSString *status, NSString *detail) {
+    if (!status.length || !g_vcmStatusQueue) return;
+
+    NSString *safeStatus = [status copy];
+    NSString *safeDetail = [detail isKindOfClass:[NSString class]] ? [detail copy] : @"";
+    dispatch_async(g_vcmStatusQueue, ^{
+        uint32_t hooks = atomic_load_explicit(&g_vcmHookCount, memory_order_acquire);
+        uint32_t frames = atomic_load_explicit(&g_vcmReplacementCount, memory_order_relaxed);
+        BOOL changed = ![g_vcmLastReportedStatus isEqualToString:safeStatus];
+        BOOL progressed = frames >= g_vcmLastReportedFrames + 120;
+        if (!changed && !progressed) return;
+
+        NSDictionary *payload = @{
+            @"status": safeStatus,
+            @"detail": safeDetail,
+            @"hooks": @(hooks),
+            @"frames": @(frames)
+        };
+        NSError *jsonError = nil;
+        NSData *body = [NSJSONSerialization dataWithJSONObject:payload options:0 error:&jsonError];
+        if (!body) return;
+
+        int fd = socket(AF_INET, SOCK_STREAM, 0);
+        if (fd < 0) return;
+        int noSignal = 1;
+        setsockopt(fd, SOL_SOCKET, SO_NOSIGPIPE, &noSignal, sizeof(noSignal));
+
+        struct timeval timeout = {1, 0};
+        setsockopt(fd, SOL_SOCKET, SO_RCVTIMEO, &timeout, sizeof(timeout));
+        setsockopt(fd, SOL_SOCKET, SO_SNDTIMEO, &timeout, sizeof(timeout));
+
+        struct sockaddr_in address;
+        memset(&address, 0, sizeof(address));
+        address.sin_len = sizeof(address);
+        address.sin_family = AF_INET;
+        address.sin_port = htons(kVCMStatusPort);
+        address.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
+
+        if (connect(fd, (struct sockaddr *)&address, sizeof(address)) != 0) {
+            close(fd);
+            return;
+        }
+
+        NSString *header = [NSString stringWithFormat:
+            @"POST /engine-status HTTP/1.1\r\nHost: 127.0.0.1\r\nContent-Type: application/json\r\nContent-Length: %lu\r\nConnection: close\r\n\r\n",
+            (unsigned long)body.length];
+        BOOL sent = VCMSendStatusBytes(fd, header.UTF8String, header.length) &&
+                    VCMSendStatusBytes(fd, body.bytes, body.length);
+        close(fd);
+
+        if (sent) {
+            g_vcmLastReportedStatus = safeStatus;
+            g_vcmLastReportedFrames = frames;
+        }
+    });
+}
 static CFStringRef const kVCMSystemReplacementAttachment =
     CFSTR("com.vcam.pro.systemreplacement.v1");
 
@@ -119,6 +202,18 @@ static void VCMEmitSampleBuffer(id object,
                         NSLog(@"[VCam Pro/MediaServer] Fotograma de cámara sustituido (#%u).",
                               count);
                     }
+                    if (count <= 3 || count % 120 == 0) {
+                        VCMReportEngineStatus(@"frames_replaced",
+                            [NSString stringWithFormat:@"VCam ya sustituyó %u fotogramas de cámara.", count]);
+                    }
+                } else if (imageBuffer) {
+                    uint32_t attempts = atomic_fetch_add_explicit(&g_vcmUnreplacedCount,
+                                                                  1,
+                                                                  memory_order_relaxed) + 1;
+                    if (attempts == 1 || attempts % 120 == 0) {
+                        VCMReportEngineStatus(@"hook_active_no_frame",
+                            @"El hook recibe fotogramas, pero el medio virtual todavía no está listo para renderizarse.");
+                    }
                 }
             }
         }
@@ -181,6 +276,8 @@ static void VCMInstallMediaGraphHooks(void) {
     Class baseClass = objc_getClass("BWNodeOutput");
     if (!baseClass) {
         NSLog(@"[VCam Pro/MediaServer] BWNodeOutput todavía no está cargada.");
+        VCMReportEngineStatus(@"waiting_for_class",
+            @"mediaserverd está cargado, pero BWNodeOutput todavía no aparece en el runtime.");
         return;
     }
 
@@ -206,6 +303,11 @@ static void VCMInstallMediaGraphHooks(void) {
     if (installed > 0) {
         NSLog(@"[VCam Pro/MediaServer] Total de hooks de salida instalados: %u.",
               installed);
+        VCMReportEngineStatus(@"hook_installed",
+            [NSString stringWithFormat:@"Hook instalado en %u clase(s) BWNodeOutput.", installed]);
+    } else {
+        VCMReportEngineStatus(@"waiting_for_hook",
+            @"BWNodeOutput existe, pero aún no se encontró un método emitSampleBuffer: compatible.");
     }
 }
 
@@ -222,7 +324,13 @@ static void VCMImageDidLoad(const struct mach_header *header, intptr_t slide) {
 }
 
 static void VCMScheduleRetry(NSUInteger attempt) {
-    if (attempt > 20) return;
+    if (attempt > 20) {
+        if (atomic_load_explicit(&g_vcmHookCount, memory_order_acquire) == 0) {
+            VCMReportEngineStatus(@"hook_not_found",
+                @"No se encontró un hook BWNodeOutput compatible después de los reintentos.");
+        }
+        return;
+    }
     dispatch_after(dispatch_time(DISPATCH_TIME_NOW,
                                  (int64_t)(0.5 * NSEC_PER_SEC)),
                    g_vcmInstallQueue, ^{
@@ -241,9 +349,13 @@ static void VCamMediaServerInitialize(void) {
 
         g_vcmInstallQueue = dispatch_queue_create("com.vcam.pro.mediaserver.hooks",
                                                   DISPATCH_QUEUE_SERIAL);
+        g_vcmStatusQueue = dispatch_queue_create("com.vcam.pro.mediaserver.status",
+                                                 DISPATCH_QUEUE_SERIAL);
         g_vcmHookLock = [[NSLock alloc] init];
 
         NSLog(@"[VCam Pro/MediaServer] Dylib cargada dentro de mediaserverd.");
+        VCMReportEngineStatus(@"loaded",
+            @"VCamMediaServer se cargó dentro del proceso mediaserverd.");
         [[VCamMediaServerSource sharedSource] startMonitoring];
 
         _dyld_register_func_for_add_image(VCMImageDidLoad);
