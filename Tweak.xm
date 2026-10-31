@@ -1337,6 +1337,18 @@ static void VCamShowAdjustmentPanel(void) {
 
 #pragma mark - Media Picker Delegate
 
+static UIImage *VCamCreateOrientationNormalizedImage(UIImage *image) {
+    if (!image) return nil;
+    CGSize size = image.size;
+    if (size.width <= 0.0 || size.height <= 0.0) return nil;
+
+    UIGraphicsBeginImageContextWithOptions(size, NO, 1.0);
+    [image drawInRect:CGRectMake(0, 0, size.width, size.height)];
+    UIImage *normalized = UIGraphicsGetImageFromCurrentImageContext();
+    UIGraphicsEndImageContext();
+    return normalized;
+}
+
 @interface VCamImagePickerDelegate : NSObject <UINavigationControllerDelegate, UIImagePickerControllerDelegate>
 @end
 
@@ -1392,7 +1404,8 @@ static void VCamShowAdjustmentPanel(void) {
         }
     }
 
-    NSData *jpeg = image ? UIImageJPEGRepresentation(image, 0.94) : nil;
+    UIImage *normalizedImage = image ? VCamCreateOrientationNormalizedImage(image) : nil;
+    NSData *jpeg = normalizedImage ? UIImageJPEGRepresentation(normalizedImage, 0.94) : nil;
     if (!jpeg) {
         NSLog(@"[VCam Pro] No se pudo obtener o convertir la imagen seleccionada.");
         [picker dismissViewControllerAnimated:YES completion:nil];
