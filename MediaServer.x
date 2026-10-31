@@ -203,13 +203,14 @@ static void VCMRemoveRenderedOrientationAttachments(CVPixelBufferRef pixelBuffer
     if (!attachments) return;
 
     CFIndex count = CFDictionaryGetCount(attachments);
+    const void **rawKeys = count > 0 ? calloc((size_t)count, sizeof(void *)) : NULL;
     CFMutableArrayRef keys = CFArrayCreateMutable(
-        kCFAllocatorDefault, count, &kCFTypeArrayCallBacks);
-    if (keys) {
-        CFDictionaryApplyFunction(attachments,
-            (CFDictionaryApplierFunction)^(const void *key, const void *value, void *context) {
-                if (key) CFArrayAppendValue((CFMutableArrayRef)context, key);
-            }, keys);
+        kCFAllocatorDefault, 0, &kCFTypeArrayCallBacks);
+    if (rawKeys && keys) {
+        CFDictionaryGetKeysAndValues(attachments, rawKeys, NULL);
+        for (CFIndex index = 0; index < count; index++) {
+            if (rawKeys[index]) CFArrayAppendValue(keys, rawKeys[index]);
+        }
         CFIndex keyCount = CFArrayGetCount(keys);
         for (CFIndex index = 0; index < keyCount; index++) {
             CFStringRef key = (CFStringRef)CFArrayGetValueAtIndex(keys, index);
@@ -217,8 +218,9 @@ static void VCMRemoveRenderedOrientationAttachments(CVPixelBufferRef pixelBuffer
                 CVBufferRemoveAttachment(pixelBuffer, key);
             }
         }
-        CFRelease(keys);
     }
+    free(rawKeys);
+    if (keys) CFRelease(keys);
 }
 
 static CMSampleBufferRef VCMCreateReplacementSampleBuffer(
