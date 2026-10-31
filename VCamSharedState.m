@@ -615,10 +615,33 @@ static BOOL VCamSendAll(int socketFD, const void *bytes, size_t length) {
         return;
     }
 
-    if (isGET && [requestPath isEqualToString:@"/media"]) {
+    if (isGET && ([requestPath isEqualToString:@"/media"] || [requestPath hasPrefix:@"/media?"])) {
+        NSInteger requestedRevision = 0;
+        if ([requestPath containsString:@"?"]) {
+            NSURLComponents *components = [NSURLComponents componentsWithString:
+                [@"http://127.0.0.1" stringByAppendingString:requestPath]];
+            for (NSURLQueryItem *item in components.queryItems) {
+                if ([item.name isEqualToString:@"revision"]) {
+                    requestedRevision = item.value.integerValue;
+                    break;
+                }
+            }
+        }
+
         [_stateLock lock];
+        NSInteger currentRevision = _mediaRevision;
         NSString *mediaPath = [_mediaPath copy];
         [_stateLock unlock];
+
+        if (requestedRevision > 0 && requestedRevision != currentRevision) {
+            NSData *body = [@"Media revision changed; refresh state and retry." dataUsingEncoding:NSUTF8StringEncoding];
+            NSString *responseHeader = [NSString stringWithFormat:
+                @"HTTP/1.1 409 Conflict\r\nCache-Control: no-store\r\nContent-Length: %lu\r\nConnection: close\r\n\r\n",
+                (unsigned long)body.length];
+            VCamSendAll(clientFD, responseHeader.UTF8String, responseHeader.length);
+            VCamSendAll(clientFD, body.bytes, body.length);
+            return;
+        }
         if (mediaPath.length == 0) {
             NSData *body = [@"No media selected" dataUsingEncoding:NSUTF8StringEncoding];
             NSString *responseHeader = [NSString stringWithFormat:@"HTTP/1.1 404 Not Found\r\nContent-Length: %lu\r\nConnection: close\r\n\r\n", (unsigned long)body.length];
