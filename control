@@ -1,12 +1,9 @@
 Package: com.yourname.vcam
 Name: VCam
 Version: 1.0.0
-Architecture: iphoneos-arm
-Description: 开源虚拟相机插件 - 替换摄像头输入为自定义视频
+Architecture: iphoneos-arm64e
+Description: Virtual camera input for AVCaptureVideoDataOutput
 Maintainer: Your Name
 Author: Your Name
 Section: Tweaks
 Depends: mobilesubstrate (>= 0.9.5000), firmware (>= 14.0)
-Conflicts: 
-Replaces: 
-Provides: 
