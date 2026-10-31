@@ -3,6 +3,8 @@
 
 NS_ASSUME_NONNULL_BEGIN
 
+FOUNDATION_EXPORT void VCMReportEngineStatus(NSString *status, NSString *detail);
+
 @interface VCamMediaServerSource : NSObject
 + (instancetype)sharedSource;
 - (void)startMonitoring;
