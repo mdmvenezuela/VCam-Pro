@@ -310,7 +310,7 @@ static BOOL VCamSendAll(int socketFD, const void *bytes, size_t length) {
 
     if (![self preparePrivateDirectory:error]) return NO;
 
-    NSString *destination = [[self privateDirectory] stringByAppendingPathComponent:@"selected.jpg"];
+    NSString *destination = [[self privateDirectory] stringByAppendingPathComponent:[NSString stringWithFormat:@"selected_%@.jpg", NSUUID.UUID.UUIDString]];
     if (![jpeg writeToFile:destination options:NSDataWritingAtomic error:error]) return NO;
     chmod(destination.fileSystemRepresentation, 0644);
 
@@ -346,7 +346,7 @@ static BOOL VCamSendAll(int socketFD, const void *bytes, size_t length) {
     ext = [[ext componentsSeparatedByCharactersInSet:allowed.invertedSet] componentsJoinedByString:@""];
     if (ext.length == 0 || ext.length > 8) ext = @"mp4";
 
-    NSString *destination = [[self privateDirectory] stringByAppendingPathComponent:[NSString stringWithFormat:@"selected.%@", ext]];
+    NSString *destination = [[self privateDirectory] stringByAppendingPathComponent:[NSString stringWithFormat:@"selected_%@.%@", NSUUID.UUID.UUIDString, ext]];
     NSFileManager *manager = [NSFileManager defaultManager];
     [manager removeItemAtPath:destination error:nil];
 
