@@ -629,7 +629,6 @@ static void VCamAttachPreviewOverlay(AVCaptureVideoPreviewLayer *previewLayer) {
         CALayer *overlay = [CALayer layer];
         overlay.name = @"VCamPro.VirtualPreview";
         overlay.frame = previewLayer.bounds;
-        overlay.autoresizingMask = kCALayerWidthSizable | kCALayerHeightSizable;
         overlay.contentsGravity = kCAGravityResizeAspectFill;
         overlay.contentsScale = [UIScreen mainScreen].scale;
         overlay.masksToBounds = YES;
@@ -802,6 +801,18 @@ static void VCamAttachPreviewOverlay(AVCaptureVideoPreviewLayer *previewLayer) {
 - (void)setSession:(AVCaptureSession *)session {
     %orig(session);
     VCamAttachPreviewOverlay(self);
+}
+
+- (void)setBounds:(CGRect)bounds {
+    %orig(bounds);
+    CALayer *overlay = objc_getAssociatedObject(self, kVCamPreviewOverlayKey);
+    if (overlay) overlay.frame = self.bounds;
+}
+
+- (void)setFrame:(CGRect)frame {
+    %orig(frame);
+    CALayer *overlay = objc_getAssociatedObject(self, kVCamPreviewOverlayKey);
+    if (overlay) overlay.frame = self.bounds;
 }
 
 %end
