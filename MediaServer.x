@@ -320,9 +320,14 @@ static void VCMEmitSampleBuffer(id object,
         return;
     }
 
+    VCamMediaServerSource *source = [VCamMediaServerSource sharedSource];
+    if (![source isReplacementEnabled]) {
+        original(object, selector, sampleBuffer);
+        return;
+    }
+
     CVPixelBufferRef replacementPixelBuffer =
-        [[VCamMediaServerSource sharedSource]
-            copyReplacementPixelBufferMatching:(CVPixelBufferRef)inputImageBuffer];
+        [source copyReplacementPixelBufferMatching:(CVPixelBufferRef)inputImageBuffer];
     if (!replacementPixelBuffer) {
         uint32_t attempts = atomic_fetch_add_explicit(&g_vcmUnreplacedCount,
                                                       1,
