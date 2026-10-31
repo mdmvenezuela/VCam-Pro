@@ -2,6 +2,8 @@
 #import <AVFoundation/AVFoundation.h>
 #import <CoreMedia/CoreMedia.h>
 #import <CoreVideo/CoreVideo.h>
+#import <CoreImage/CoreImage.h>
+#import <ImageIO/ImageIO.h>
 #import <objc/runtime.h>
 #import <arpa/inet.h>
 #import <errno.h>
@@ -45,6 +47,16 @@ static char g_darwinObserverToken;
 static const void *kVCamDelegateProxyKey = &kVCamDelegateProxyKey;
 static NSUInteger g_vcamVideoCallbackCount = 0;
 static NSUInteger g_vcamVideoReplacementCount = 0;
+static NSString *g_localMediaPath = nil;
+static NSString *g_localMediaType = nil;
+static NSHashTable<CALayer *> *g_previewOverlayLayers = nil;
+static CIContext *g_previewCIContext = nil;
+static const void *kVCamPreviewOverlayKey = &kVCamPreviewOverlayKey;
+
+static void VCamAttachPreviewOverlay(AVCaptureVideoPreviewLayer *previewLayer);
+static void VCamUpdatePreviewOverlaysWithSampleBuffer(CMSampleBufferRef sampleBuffer);
+static void VCamUpdatePreviewOverlaysWithJPEG(NSData *jpegData);
+static void VCamSetPreviewOverlaysVisible(BOOL visible);
 
 static void VCamRefreshFromServer(void);
 static void VCamCreateOverlay(void);
@@ -412,6 +424,7 @@ static void VCamRefreshFromServer(void) {
         CGFloat buttonY = [state[@"buttonY"] doubleValue];
 
         VCamSetLocalEnabled(enabled);
+        VCamSetPreviewOverlaysVisible(enabled);
         g_vcamZoom = MAX(0.5, MIN(4.0, zoom));
         g_vcamOffsetX = MAX(-1.0, MIN(1.0, offsetX));
         g_vcamOffsetY = MAX(-1.0, MIN(1.0, offsetY));
@@ -451,7 +464,15 @@ static void VCamRefreshFromServer(void) {
                 g_loadingMediaRevision = -1;
                 if (success && VCamIsEnabled()) {
                     g_lastMediaRevision = mediaRevision;
+                    @synchronized ([MediaManager class]) {
+                        g_localMediaPath = [localPath copy];
+                        g_localMediaType = [mediaType copy];
+                    }
                     [manager setZoom:g_vcamZoom offsetX:g_vcamOffsetX offsetY:g_vcamOffsetY];
+                    if ([mediaType isEqualToString:@"image"]) {
+                        NSData *stillJPEG = [manager nextPhotoData];
+                        if (stillJPEG) VCamUpdatePreviewOverlaysWithJPEG(stillJPEG);
+                    }
                     [manager start];
                     NSLog(@"[VCam Pro] Medio remoto listo en %@ (rev %ld).", [[NSBundle mainBundle] bundleIdentifier], (long)mediaRevision);
                 } else {
@@ -481,6 +502,90 @@ static void VCamRegisterIPCObserver(void) {
                                     CFSTR("com.vcam.pro.state.changed"),
                                     NULL,
                                     CFNotificationSuspensionBehaviorDeliverImmediately);
+}
+
+#pragma mark - Preview Layer Bridge
+
+static void VCamSetPreviewOverlayContents(CGImageRef image) {
+    if (!image) return;
+    CGImageRef retainedImage = CGImageRetain(image);
+    dispatch_async(dispatch_get_main_queue(), ^{
+        NSArray<CALayer *> *layers = g_previewOverlayLayers.allObjects ?: @[];
+        for (CALayer *layer in layers) {
+            layer.contents = (__bridge id)retainedImage;
+            layer.hidden = NO;
+        }
+        CGImageRelease(retainedImage);
+    });
+}
+
+static void VCamSetPreviewOverlaysVisible(BOOL visible) {
+    dispatch_async(dispatch_get_main_queue(), ^{
+        NSArray<CALayer *> *layers = g_previewOverlayLayers.allObjects ?: @[];
+        for (CALayer *layer in layers) {
+            layer.hidden = !visible;
+        }
+    });
+}
+
+static void VCamUpdatePreviewOverlaysWithSampleBuffer(CMSampleBufferRef sampleBuffer) {
+    if (!sampleBuffer || !VCamIsEnabled()) return;
+    CVImageBufferRef imageBuffer = CMSampleBufferGetImageBuffer(sampleBuffer);
+    if (!imageBuffer) return;
+
+    static dispatch_once_t onceToken;
+    dispatch_once(&onceToken, ^{
+        g_previewCIContext = [CIContext contextWithOptions:@{kCIContextUseSoftwareRenderer: @NO}];
+    });
+
+    CIImage *image = [CIImage imageWithCVPixelBuffer:imageBuffer];
+    CGRect extent = image.extent;
+    if (CGRectIsEmpty(extent) || extent.size.width < 2.0 || extent.size.height < 2.0) return;
+
+    CGImageRef cgImage = [g_previewCIContext createCGImage:image fromRect:extent];
+    if (!cgImage) return;
+    VCamSetPreviewOverlayContents(cgImage);
+    CGImageRelease(cgImage);
+}
+
+static void VCamUpdatePreviewOverlaysWithJPEG(NSData *jpegData) {
+    if (!jpegData.length || !VCamIsEnabled()) return;
+    UIImage *image = [UIImage imageWithData:jpegData];
+    if (image.CGImage) VCamSetPreviewOverlayContents(image.CGImage);
+}
+
+static void VCamAttachPreviewOverlay(AVCaptureVideoPreviewLayer *previewLayer) {
+    if (!previewLayer) return;
+    dispatch_async(dispatch_get_main_queue(), ^{
+        CALayer *existing = objc_getAssociatedObject(previewLayer, kVCamPreviewOverlayKey);
+        if (existing) return;
+
+        CALayer *overlay = [CALayer layer];
+        overlay.name = @"VCamPro.VirtualPreview";
+        overlay.frame = previewLayer.bounds;
+        overlay.autoresizingMask = kCALayerWidthSizable | kCALayerHeightSizable;
+        overlay.contentsGravity = kCAGravityResizeAspectFill;
+        overlay.contentsScale = [UIScreen mainScreen].scale;
+        overlay.masksToBounds = YES;
+        overlay.zPosition = CGFLOAT_MAX;
+        overlay.hidden = !VCamIsEnabled();
+
+        [previewLayer addSublayer:overlay];
+        objc_setAssociatedObject(previewLayer,
+                                 kVCamPreviewOverlayKey,
+                                 overlay,
+                                 OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+
+        if (!g_previewOverlayLayers) {
+            g_previewOverlayLayers = [NSHashTable weakObjectsHashTable];
+        }
+        [g_previewOverlayLayers addObject:overlay];
+
+        if (VCamIsEnabled() && [MediaManager sharedManager].mode == VCamMediaModePhoto) {
+            NSData *stillJPEG = [[MediaManager sharedManager] nextPhotoData];
+            if (stillJPEG) VCamUpdatePreviewOverlaysWithJPEG(stillJPEG);
+        }
+    });
 }
 
 #pragma mark - Video Delegate Proxy
@@ -564,6 +669,7 @@ static void VCamRegisterIPCObserver(void) {
         return;
     }
 
+    VCamUpdatePreviewOverlaysWithSampleBuffer(virtualFrame);
     @synchronized ([AVCaptureVideoDataOutput class]) {
         g_vcamVideoReplacementCount += 1;
     }
@@ -608,6 +714,27 @@ static void VCamRegisterIPCObserver(void) {
 
 %end
 
+%hook AVCaptureVideoPreviewLayer
+
+- (instancetype)initWithSession:(AVCaptureSession *)session {
+    id result = %orig(session);
+    if (result) VCamAttachPreviewOverlay((AVCaptureVideoPreviewLayer *)result);
+    return result;
+}
+
++ (instancetype)layerWithSession:(AVCaptureSession *)session {
+    id result = %orig(session);
+    if (result) VCamAttachPreviewOverlay((AVCaptureVideoPreviewLayer *)result);
+    return result;
+}
+
+- (void)setSession:(AVCaptureSession *)session {
+    %orig(session);
+    VCamAttachPreviewOverlay(self);
+}
+
+%end
+
 #pragma mark - Still Photo Result Hook
 
 static BOOL VCamIsJPEGData(NSData *data) {
@@ -616,38 +743,227 @@ static BOOL VCamIsJPEGData(NSData *data) {
     return bytes[0] == 0xFF && bytes[1] == 0xD8 && bytes[2] == 0xFF;
 }
 
+static NSString *VCamDetectedImageUTI(NSData *data) {
+    if (!data.length) return nil;
+    const uint8_t *bytes = (const uint8_t *)data.bytes;
+
+    if (VCamIsJPEGData(data)) return @"public.jpeg";
+
+    static const uint8_t pngSignature[8] = {0x89, 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A};
+    if (data.length >= sizeof(pngSignature) &&
+        memcmp(bytes, pngSignature, sizeof(pngSignature)) == 0) {
+        return @"public.png";
+    }
+
+    if (data.length >= 12 && memcmp(bytes + 4, "ftyp", 4) == 0) {
+        NSString *brand = [[NSString alloc] initWithBytes:bytes + 8
+                                                   length:4
+                                                 encoding:NSASCIIStringEncoding];
+        NSSet *heifBrands = [NSSet setWithArray:@[@"heic", @"heix", @"hevc", @"hevx", @"mif1", @"msf1"]];
+        if ([heifBrands containsObject:brand.lowercaseString]) return @"public.heic";
+    }
+
+    return nil;
+}
+
+static NSData *VCamEncodeJPEGAsUTI(NSData *jpegData, NSString *uti) {
+    if (!jpegData.length || !uti.length) return nil;
+    if ([uti isEqualToString:@"public.jpeg"] && VCamIsJPEGData(jpegData)) return jpegData;
+
+    CGImageSourceRef source = CGImageSourceCreateWithData((__bridge CFDataRef)jpegData, NULL);
+    if (!source) return nil;
+
+    CGImageRef image = CGImageSourceCreateImageAtIndex(source, 0, NULL);
+    CFRelease(source);
+    if (!image) return nil;
+
+    NSMutableData *encoded = [NSMutableData data];
+    CGImageDestinationRef destination = CGImageDestinationCreateWithData((__bridge CFMutableDataRef)encoded,
+                                                                          (__bridge CFStringRef)uti,
+                                                                          1,
+                                                                          NULL);
+    if (!destination) {
+        CGImageRelease(image);
+        return nil;
+    }
+
+    CGImageDestinationAddImage(destination, image, NULL);
+    BOOL finished = CGImageDestinationFinalize(destination);
+    CFRelease(destination);
+    CGImageRelease(image);
+
+    return finished ? encoded : nil;
+}
+
 %hook AVCapturePhoto
 
 - (NSData *)fileDataRepresentation {
-    // Primero obtenemos el resultado original para conservar intactos HEIC,
-    // RAW u otros contenedores que este reemplazo JPEG no puede reproducir.
     NSData *original = %orig;
     if (!VCamIsEnabled() || ![MediaManager sharedManager].isReady) return original;
-    if (!VCamIsJPEGData(original)) return original;
 
-    NSData *replacement = [[MediaManager sharedManager] nextPhotoData];
-    if (replacement.length > 0 && VCamIsJPEGData(replacement)) {
-        NSLog(@"[VCam Pro] AVCapturePhoto JPEG sustituido por imagen virtual.");
+    // JPEG, PNG y HEIC pueden regenerarse desde la imagen virtual. RAW y
+    // contenedores desconocidos se conservan para no devolver datos corruptos.
+    NSString *uti = VCamDetectedImageUTI(original);
+    if (!uti) return original;
+
+    NSData *virtualJPEG = [[MediaManager sharedManager] nextPhotoData];
+    NSData *replacement = VCamEncodeJPEGAsUTI(virtualJPEG, uti);
+    if (replacement.length > 0) {
+        NSLog(@"[VCam Pro] AVCapturePhoto sustituida en formato %@.", uti);
         return replacement;
     }
+
+    NSLog(@"[VCam Pro] No se pudo codificar la captura virtual como %@; se conserva la original.", uti);
     return original;
 }
 
 %end
 
-// Compatibilidad con aplicaciones antiguas que convierten capturas JPEG
-// mediante AVCaptureStillImageOutput en lugar de AVCapturePhotoOutput.
+// Compatibilidad con aplicaciones antiguas que solicitan una representación JPEG.
 %hook AVCaptureStillImageOutput
 
 + (NSData *)jpegStillImageNSDataRepresentation:(CMSampleBufferRef)jpegSampleBuffer {
     if (VCamIsEnabled() && [MediaManager sharedManager].isReady) {
         NSData *replacement = [[MediaManager sharedManager] nextPhotoData];
-        if (replacement.length > 0) {
+        if (replacement.length > 0 && VCamIsJPEGData(replacement)) {
             NSLog(@"[VCam Pro] Conversión JPEG de AVCaptureStillImageOutput sustituida.");
             return replacement;
         }
     }
     return %orig(jpegSampleBuffer);
+}
+
+%end
+
+
+#pragma mark - Movie File Output Replacement
+
+static BOOL VCamReplaceRecordingFile(NSURL *destinationURL, NSString *sourcePath) {
+    if (!destinationURL.isFileURL || !sourcePath.length) return NO;
+
+    NSURL *sourceURL = [NSURL fileURLWithPath:sourcePath];
+    if ([sourceURL.path isEqualToString:destinationURL.path]) return NO;
+
+    NSFileManager *fileManager = [NSFileManager defaultManager];
+    if (![fileManager fileExistsAtPath:sourceURL.path]) return NO;
+
+    NSString *directory = destinationURL.URLByDeletingLastPathComponent.path;
+    NSString *extension = destinationURL.pathExtension.length ? destinationURL.pathExtension : sourceURL.pathExtension;
+    if (!extension.length) extension = @"mov";
+
+    NSString *token = NSUUID.UUID.UUIDString;
+    NSURL *temporaryURL = [NSURL fileURLWithPath:
+        [directory stringByAppendingPathComponent:
+            [NSString stringWithFormat:@".vcam-replacement-%@.%@", token, extension]]];
+    NSURL *backupURL = [NSURL fileURLWithPath:
+        [directory stringByAppendingPathComponent:
+            [NSString stringWithFormat:@".vcam-original-%@.%@", token, extension]]];
+
+    NSError *error = nil;
+    if (![fileManager copyItemAtURL:sourceURL toURL:temporaryURL error:&error]) {
+        NSLog(@"[VCam Pro] No se pudo preparar el vídeo virtual: %@", error);
+        return NO;
+    }
+
+    BOOL hadOriginal = [fileManager fileExistsAtPath:destinationURL.path];
+    if (hadOriginal && ![fileManager moveItemAtURL:destinationURL toURL:backupURL error:&error]) {
+        [fileManager removeItemAtURL:temporaryURL error:nil];
+        NSLog(@"[VCam Pro] No se pudo respaldar el vídeo grabado: %@", error);
+        return NO;
+    }
+
+    if (![fileManager moveItemAtURL:temporaryURL toURL:destinationURL error:&error]) {
+        if (hadOriginal) [fileManager moveItemAtURL:backupURL toURL:destinationURL error:nil];
+        [fileManager removeItemAtURL:temporaryURL error:nil];
+        NSLog(@"[VCam Pro] No se pudo sustituir el archivo grabado: %@", error);
+        return NO;
+    }
+
+    if (hadOriginal) [fileManager removeItemAtURL:backupURL error:nil];
+    NSLog(@"[VCam Pro] Archivo de grabación sustituido por el vídeo seleccionado.");
+    return YES;
+}
+
+@interface VCamMovieRecordingDelegateProxy : NSObject <AVCaptureFileOutputRecordingDelegate>
+@property (nonatomic, weak) id<AVCaptureFileOutputRecordingDelegate> originalDelegate;
+@property (nonatomic, copy) NSString *sourceMediaPath;
+@property (nonatomic, copy) NSString *sourceMediaType;
+- (instancetype)initWithDelegate:(id<AVCaptureFileOutputRecordingDelegate>)delegate
+                       sourcePath:(NSString *)sourcePath
+                       sourceType:(NSString *)sourceType;
+@end
+
+@implementation VCamMovieRecordingDelegateProxy
+
+- (instancetype)initWithDelegate:(id<AVCaptureFileOutputRecordingDelegate>)delegate
+                       sourcePath:(NSString *)sourcePath
+                       sourceType:(NSString *)sourceType {
+    self = [super init];
+    if (self) {
+        _originalDelegate = delegate;
+        _sourceMediaPath = [sourcePath copy];
+        _sourceMediaType = [sourceType copy];
+    }
+    return self;
+}
+
+- (BOOL)respondsToSelector:(SEL)selector {
+    return [super respondsToSelector:selector] || [self.originalDelegate respondsToSelector:selector];
+}
+
+- (id)forwardingTargetForSelector:(SEL)selector {
+    if ([self.originalDelegate respondsToSelector:selector]) return self.originalDelegate;
+    return [super forwardingTargetForSelector:selector];
+}
+
+- (void)captureOutput:(AVCaptureFileOutput *)output
+didFinishRecordingToOutputFileAtURL:(NSURL *)outputFileURL
+      fromConnections:(NSArray<AVCaptureConnection *> *)connections
+                error:(NSError *)error {
+
+    if (!error && VCamIsEnabled() &&
+        [self.sourceMediaType isEqualToString:@"video"] &&
+        self.sourceMediaPath.length > 0) {
+        VCamReplaceRecordingFile(outputFileURL, self.sourceMediaPath);
+    }
+
+    id<AVCaptureFileOutputRecordingDelegate> delegate = self.originalDelegate;
+    if ([delegate respondsToSelector:
+         @selector(captureOutput:didFinishRecordingToOutputFileAtURL:fromConnections:error:)]) {
+        [delegate captureOutput:output
+didFinishRecordingToOutputFileAtURL:outputFileURL
+              fromConnections:connections
+                        error:error];
+    }
+
+    objc_setAssociatedObject(output, kVCamDelegateProxyKey, nil, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+}
+
+@end
+
+%hook AVCaptureFileOutput
+
+- (void)startRecordingToOutputFileURL:(NSURL *)outputFileURL
+                    recordingDelegate:(id<AVCaptureFileOutputRecordingDelegate>)delegate {
+    if (!delegate || [delegate isKindOfClass:[VCamMovieRecordingDelegateProxy class]]) {
+        %orig(outputFileURL, delegate);
+        return;
+    }
+
+    NSString *sourcePath = nil;
+    NSString *sourceType = nil;
+    @synchronized ([MediaManager class]) {
+        sourcePath = [g_localMediaPath copy];
+        sourceType = [g_localMediaType copy];
+    }
+
+    VCamMovieRecordingDelegateProxy *proxy =
+        [[VCamMovieRecordingDelegateProxy alloc] initWithDelegate:delegate
+                                                       sourcePath:sourcePath ?: @""
+                                                       sourceType:sourceType ?: @""];
+
+    objc_setAssociatedObject(self, kVCamDelegateProxyKey, proxy, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+    %orig(outputFileURL, proxy);
 }
 
 %end
@@ -1023,6 +1339,10 @@ static void VCamClampButton(void) {
 }
 
 static void VCamCreateOverlay(void) {
+    // SpringBoard owns the only floating control. App processes only install
+    // camera hooks and receive state/media over the local IPC channel.
+    if (!g_isSpringBoardProcess) return;
+
     UIApplication *application = [UIApplication sharedApplication];
     if (application.applicationState != UIApplicationStateActive || !application.protectedDataAvailable) return;
     if (![NSThread isMainThread]) {
@@ -1099,13 +1419,13 @@ static void VCamRegisterLifecycle(void) {
     [g_lifecycleObservers addObject:active];
 
     id resign = [center addObserverForName:UIApplicationWillResignActiveNotification object:nil queue:[NSOperationQueue mainQueue] usingBlock:^(NSNotification *note) {
-        g_overlayWindow.hidden = YES;
+        if (!g_isSpringBoardProcess) g_overlayWindow.hidden = YES;
         [[MediaManager sharedManager] stop];
     }];
     [g_lifecycleObservers addObject:resign];
 
     id background = [center addObserverForName:UIApplicationDidEnterBackgroundNotification object:nil queue:[NSOperationQueue mainQueue] usingBlock:^(NSNotification *note) {
-        g_overlayWindow.hidden = YES;
+        if (!g_isSpringBoardProcess) g_overlayWindow.hidden = YES;
         [[MediaManager sharedManager] stop];
     }];
     [g_lifecycleObservers addObject:background];
