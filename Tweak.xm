@@ -379,7 +379,7 @@ static NSString *VCamDownloadCurrentMedia(NSString *extension, NSInteger revisio
 
     NSString *filename = [NSString stringWithFormat:@"vcam_shared_%ld.%@", (long)revision, safeExtension];
     NSString *path = [NSTemporaryDirectory() stringByAppendingPathComponent:filename];
-    if (!VCamHTTPDownloadToFile(@"/media", path)) {
+    if (!VCamHTTPDownloadToFile([NSString stringWithFormat:@"/media?revision=%ld", (long)revision], path)) {
         NSLog(@"[VCam Pro] No se pudo descargar el medio compartido desde SpringBoard.");
         return nil;
     }
