@@ -217,6 +217,20 @@ static BOOL VCamSendAll(int socketFD, const void *bytes, size_t length) {
     return value;
 }
 
+- (BOOL)mirrorEnabled {
+    [_stateLock lock];
+    BOOL value = _mirrorEnabled;
+    [_stateLock unlock];
+    return value;
+}
+
+- (BOOL)motionEnabled {
+    [_stateLock lock];
+    BOOL value = _motionEnabled;
+    [_stateLock unlock];
+    return value;
+}
+
 - (CGFloat)buttonX {
     [_stateLock lock];
     CGFloat value = _buttonX;
