@@ -950,7 +950,46 @@ static NSData *VCamEncodeJPEGAsUTI(NSData *jpegData, NSString *uti) {
     return finished ? encoded : nil;
 }
 
+static char kVCamPhotoReplacementDataKey;
+
+static NSData *VCamReplacementDataForPhoto(AVCapturePhoto *photo) {
+    if (!photo) return nil;
+    NSData *cached = objc_getAssociatedObject(photo, &kVCamPhotoReplacementDataKey);
+    if (cached.length > 0) return cached;
+
+    NSData *generated = [[MediaManager sharedManager] nextPhotoData];
+    if (!generated.length || !VCamIsJPEGData(generated)) return nil;
+
+    // Both the embedded preview and the saved file must represent the same
+    // virtual frame, even when AVFoundation asks for them in separate calls.
+    objc_setAssociatedObject(photo,
+                             &kVCamPhotoReplacementDataKey,
+                             generated,
+                             OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+    return generated;
+}
+
 %hook AVCapturePhoto
+
+- (CGImageRef)previewCGImageRepresentation {
+    CGImageRef original = %orig;
+    if (!original || !VCamIsEnabled() || ![MediaManager sharedManager].isReady) return original;
+
+    NSData *virtualJPEG = VCamReplacementDataForPhoto(self);
+    if (!virtualJPEG.length) return original;
+
+    CGImageSourceRef source = CGImageSourceCreateWithData((__bridge CFDataRef)virtualJPEG, NULL);
+    if (!source) return original;
+
+    CGImageRef replacement = CGImageSourceCreateImageAtIndex(source, 0, NULL);
+    CFRelease(source);
+    if (!replacement) return original;
+
+    NSLog(@"[VCam Pro] Miniatura de AVCapturePhoto sustituida por el fotograma virtual.");
+    // The AVFoundation method returns a non-owned CGImageRef. Autorelease the
+    // Create-rule result so ARC keeps it alive for the caller's autorelease pool.
+    return (CGImageRef)CFAutorelease(replacement);
+}
 
 - (NSData *)fileDataRepresentation {
     NSData *original = %orig;
@@ -961,7 +1000,7 @@ static NSData *VCamEncodeJPEGAsUTI(NSData *jpegData, NSString *uti) {
     NSString *uti = VCamDetectedImageUTI(original);
     if (!uti) return original;
 
-    NSData *virtualJPEG = [[MediaManager sharedManager] nextPhotoData];
+    NSData *virtualJPEG = VCamReplacementDataForPhoto(self);
     NSData *replacement = VCamEncodeJPEGAsUTI(virtualJPEG, uti);
     if (replacement.length > 0) {
         NSLog(@"[VCam Pro] AVCapturePhoto sustituida en formato %@.", uti);
