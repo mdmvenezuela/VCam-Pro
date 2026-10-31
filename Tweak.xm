@@ -692,6 +692,22 @@ static void VCamAttachPreviewOverlay(AVCaptureVideoPreviewLayer *previewLayer) {
         return;
     }
 
+    // The mediaserverd engine marks frames it has already replaced. Bypass
+    // app-local decoding for that exact sample to avoid double advancement.
+    CFTypeRef systemMarker = CMGetAttachment(sampleBuffer,
+                                              CFSTR("com.vcam.pro.systemreplacement.v1"),
+                                              NULL);
+    CVImageBufferRef sampleImage = CMSampleBufferGetImageBuffer(sampleBuffer);
+    CFTypeRef pixelMarker = sampleImage
+        ? CVBufferGetAttachment(sampleImage,
+                                CFSTR("com.vcam.pro.systemreplacement.v1"),
+                                NULL)
+        : NULL;
+    if (systemMarker == kCFBooleanTrue || pixelMarker == kCFBooleanTrue) {
+        [delegate captureOutput:output didOutputSampleBuffer:sampleBuffer fromConnection:connection];
+        return;
+    }
+
     NSUInteger callbackNumber = 0;
     @synchronized ([AVCaptureVideoDataOutput class]) {
         g_vcamVideoCallbackCount += 1;
