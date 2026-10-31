@@ -35,6 +35,8 @@ static CGFloat g_vcamZoom = 1.0;
 static CGFloat g_vcamOffsetX = 0.0;
 static CGFloat g_vcamOffsetY = 0.0;
 static NSInteger g_vcamRotationDegrees = 0;
+static BOOL g_vcamMirrorEnabled = NO;
+static BOOL g_vcamMotionEnabled = NO;
 static CGFloat g_vcamButtonX = 0.92;
 static CGFloat g_vcamButtonY = 0.24;
 static NSInteger g_lastMediaRevision = -1;
@@ -402,6 +404,8 @@ static void VCamRefreshFromServer(void) {
         CGFloat offsetX = [state[@"offsetX"] doubleValue];
         CGFloat offsetY = [state[@"offsetY"] doubleValue];
         NSInteger rotationDegrees = [state[@"rotationDegrees"] integerValue];
+        BOOL mirrorEnabled = [state[@"mirrorEnabled"] boolValue];
+        BOOL motionEnabled = [state[@"motionEnabled"] boolValue];
         CGFloat buttonX = [state[@"buttonX"] doubleValue];
         CGFloat buttonY = [state[@"buttonY"] doubleValue];
 
@@ -411,6 +415,8 @@ static void VCamRefreshFromServer(void) {
         g_vcamOffsetX = MAX(-1.0, MIN(1.0, offsetX));
         g_vcamOffsetY = MAX(-1.0, MIN(1.0, offsetY));
         g_vcamRotationDegrees = ((rotationDegrees % 360) + 360) % 360;
+        g_vcamMirrorEnabled = mirrorEnabled;
+        g_vcamMotionEnabled = motionEnabled;
         g_vcamButtonX = MAX(0.04, MIN(0.96, buttonX));
         g_vcamButtonY = MAX(0.04, MIN(0.96, buttonY));
 
@@ -432,6 +438,8 @@ static void VCamRefreshFromServer(void) {
         MediaManager *manager = [MediaManager sharedManager];
         [manager setZoom:g_vcamZoom offsetX:g_vcamOffsetX offsetY:g_vcamOffsetY];
         [manager setRotationDegrees:g_vcamRotationDegrees];
+        [manager setMirrorEnabled:g_vcamMirrorEnabled];
+        [manager setMotionEnabled:g_vcamMotionEnabled];
 
         if (enabled &&
             application.applicationState == UIApplicationStateActive &&
@@ -1176,6 +1184,18 @@ static NSData *VCamEncodeJPEGAsUTI(NSData *jpegData, NSString *uti) {
     _zoomLabel.textAlignment = NSTextAlignmentCenter;
     [self addSubview:_zoomLabel];
 
+    UIButton *mirrorButton = [self controlButton:@"Espejo: OFF" action:@selector(toggleMirror)];
+    mirrorButton.tag = 4818;
+    mirrorButton.titleLabel.font = [UIFont systemFontOfSize:10 weight:UIFontWeightSemibold];
+    mirrorButton.titleLabel.adjustsFontSizeToFitWidth = YES;
+    [self addSubview:mirrorButton];
+
+    UIButton *motionButton = [self controlButton:@"Movimiento: OFF" action:@selector(toggleMotion)];
+    motionButton.tag = 4819;
+    motionButton.titleLabel.font = [UIFont systemFontOfSize:10 weight:UIFontWeightSemibold];
+    motionButton.titleLabel.adjustsFontSizeToFitWidth = YES;
+    [self addSubview:motionButton];
+
     [self refreshFraming];
     [self reloadPreview];
     return self;
@@ -1207,12 +1227,28 @@ static NSData *VCamEncodeJPEGAsUTI(NSData *jpegData, NSString *uti) {
     [self viewWithTag:4815].frame = CGRectMake(centerX - 66, 258, 38, 27);
     self.zoomLabel.frame = CGRectMake(centerX - 25, 258, 50, 27);
     [self viewWithTag:4816].frame = CGRectMake(centerX + 28, 258, 38, 27);
+    CGFloat toggleWidth = (width - 38.0) * 0.5;
+    [self viewWithTag:4818].frame = CGRectMake(14, 292, toggleWidth, 27);
+    [self viewWithTag:4819].frame = CGRectMake(24 + toggleWidth, 292, toggleWidth, 27);
 
     [self refreshFraming];
 }
 
 - (void)refreshFraming {
     self.zoomLabel.text = [NSString stringWithFormat:@"%.1fx", g_vcamZoom];
+    UIButton *mirrorButton = (UIButton *)[self viewWithTag:4818];
+    UIButton *motionButton = (UIButton *)[self viewWithTag:4819];
+    [mirrorButton setTitle:(g_vcamMirrorEnabled ? @"Espejo: ON" : @"Espejo: OFF")
+                  forState:UIControlStateNormal];
+    [motionButton setTitle:(g_vcamMotionEnabled ? @"Movimiento: ON" : @"Movimiento: OFF")
+                  forState:UIControlStateNormal];
+    mirrorButton.backgroundColor = g_vcamMirrorEnabled
+        ? [UIColor colorWithRed:0.12 green:0.42 blue:0.72 alpha:0.95]
+        : [UIColor colorWithWhite:1.0 alpha:0.13];
+    motionButton.backgroundColor = g_vcamMotionEnabled
+        ? [UIColor colorWithRed:0.12 green:0.52 blue:0.34 alpha:0.95]
+        : [UIColor colorWithWhite:1.0 alpha:0.13];
+
     UIImage *image = self.previewImageView.image;
     if (!image || CGRectIsEmpty(self.previewContainer.bounds)) return;
 
@@ -1226,15 +1262,27 @@ static NSData *VCamEncodeJPEGAsUTI(NSData *jpegData, NSString *uti) {
     CGSize orientedSize = swapsDimensions
         ? CGSizeMake(imageSize.height, imageSize.width)
         : imageSize;
-    CGFloat scale = MAX(width / orientedSize.width, height / orientedSize.height) * g_vcamZoom;
+    CGFloat motionScale = g_vcamMotionEnabled ? 1.018 : 1.0;
+    CGFloat scale = MAX(width / orientedSize.width, height / orientedSize.height)
+        * g_vcamZoom * motionScale;
     CGFloat renderedWidth = imageSize.width * scale;
     CGFloat renderedHeight = imageSize.height * scale;
+
+    // Match the active mediaserverd renderer: X moves with +offsetX,
+    // while +offsetY moves the image upward in the final camera frame.
     CGFloat centerX = width * 0.5 + g_vcamOffsetX * width;
-    CGFloat centerY = height * 0.5 + g_vcamOffsetY * height;
-    self.previewImageView.transform = CGAffineTransformIdentity;
+    CGFloat centerY = height * 0.5 - g_vcamOffsetY * height;
     self.previewImageView.bounds = CGRectMake(0, 0, renderedWidth, renderedHeight);
     self.previewImageView.center = CGPointMake(centerX, centerY);
-    self.previewImageView.transform = CGAffineTransformMakeRotation((CGFloat)rotation * (CGFloat)M_PI / 180.0);
+
+    CGAffineTransform previewTransform =
+        CGAffineTransformMakeRotation((CGFloat)rotation * (CGFloat)M_PI / 180.0);
+    if (g_vcamMirrorEnabled) {
+        previewTransform = CGAffineTransformConcat(
+            previewTransform,
+            CGAffineTransformMakeScale(-1.0, 1.0));
+    }
+    self.previewImageView.transform = previewTransform;
 }
 
 - (void)reloadPreview {
@@ -1326,6 +1374,18 @@ static NSData *VCamEncodeJPEGAsUTI(NSData *jpegData, NSString *uti) {
 - (void)zoomOut { g_vcamZoom -= 0.1; [self publishTransform]; }
 - (void)rotateClockwise { g_vcamRotationDegrees = (g_vcamRotationDegrees + 90) % 360; [self publishTransform]; }
 
+- (void)toggleMirror {
+    g_vcamMirrorEnabled = !g_vcamMirrorEnabled;
+    [[VCamSharedState sharedState] setMirrorEnabled:g_vcamMirrorEnabled];
+    [self refreshFraming];
+}
+
+- (void)toggleMotion {
+    g_vcamMotionEnabled = !g_vcamMotionEnabled;
+    [[VCamSharedState sharedState] setMotionEnabled:g_vcamMotionEnabled];
+    [self refreshFraming];
+}
+
 - (void)resetTransform {
     g_vcamZoom = 1.0;
     g_vcamOffsetX = 0.0;
@@ -1375,7 +1435,7 @@ static void VCamShowAdjustmentPanel(void) {
     }
 
     CGFloat width = MIN(244.0, CGRectGetWidth(g_overlayController.view.bounds) - 20.0);
-    CGFloat height = 294.0;
+    CGFloat height = 330.0;
     CGFloat x = MAX(10.0, CGRectGetWidth(g_overlayController.view.bounds) - width - 14.0);
     CGFloat y = MAX(50.0, CGRectGetHeight(g_overlayController.view.bounds) - height - 92.0);
 
