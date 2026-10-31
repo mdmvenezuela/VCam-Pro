@@ -1022,107 +1022,250 @@ static NSData *VCamEncodeJPEGAsUTI(NSData *jpegData, NSString *uti) {
 
 @end
 
-#pragma mark - Image Adjustment Panel
+#pragma mark - Compact Floating Adjustment Panel
 
-@interface VCamAdjustmentViewController : UIViewController
-- (void)moveUp;
-- (void)moveDown;
-- (void)moveLeft;
-- (void)moveRight;
-- (void)zoomIn;
-- (void)zoomOut;
-- (void)resetTransform;
-- (void)publishTransform;
-- (void)closePanel;
+@interface VCamAdjustmentPanel : UIView
+@property (nonatomic, strong) UIView *headerView;
+@property (nonatomic, strong) UIView *previewContainer;
+@property (nonatomic, strong) UIImageView *previewImageView;
+@property (nonatomic, strong) UILabel *placeholderLabel;
+@property (nonatomic, strong) UILabel *zoomLabel;
+@property (nonatomic, strong) UIButton *closeButton;
+@property (nonatomic, strong) UIPanGestureRecognizer *dragGesture;
+- (void)reloadPreview;
+- (void)refreshFraming;
 @end
 
-@implementation VCamAdjustmentViewController
+@implementation VCamAdjustmentPanel
 
 - (UIButton *)controlButton:(NSString *)title action:(SEL)action {
     UIButton *button = [UIButton buttonWithType:UIButtonTypeSystem];
     [button setTitle:title forState:UIControlStateNormal];
-    button.titleLabel.font = [UIFont systemFontOfSize:23 weight:UIFontWeightSemibold];
-    button.backgroundColor = [UIColor secondarySystemBackgroundColor];
-    button.layer.cornerRadius = 12.0;
-    [button.widthAnchor constraintEqualToConstant:64].active = YES;
-    [button.heightAnchor constraintEqualToConstant:54].active = YES;
+    [button setTitleColor:UIColor.whiteColor forState:UIControlStateNormal];
+    button.titleLabel.font = [UIFont systemFontOfSize:19 weight:UIFontWeightSemibold];
+    button.backgroundColor = [UIColor colorWithWhite:1.0 alpha:0.13];
+    button.layer.cornerRadius = 10.0;
+    button.layer.borderWidth = 1.0;
+    button.layer.borderColor = [UIColor colorWithWhite:1.0 alpha:0.08].CGColor;
     [button addTarget:self action:action forControlEvents:UIControlEventTouchUpInside];
     return button;
 }
 
-- (void)viewDidLoad {
-    [super viewDidLoad];
-    self.view.backgroundColor = [UIColor systemBackgroundColor];
-    self.title = @"Ajustar imagen";
+- (instancetype)initWithFrame:(CGRect)frame {
+    self = [super initWithFrame:frame];
+    if (!self) return nil;
 
-    UILabel *description = [[UILabel alloc] init];
-    description.text = @"Mueve la imagen y ajusta el zoom de la cámara virtual.";
-    description.font = [UIFont systemFontOfSize:14];
-    description.textColor = [UIColor secondaryLabelColor];
-    description.textAlignment = NSTextAlignmentCenter;
-    description.numberOfLines = 0;
+    self.backgroundColor = [UIColor colorWithWhite:0.055 alpha:0.96];
+    self.layer.cornerRadius = 18.0;
+    self.layer.borderWidth = 1.0;
+    self.layer.borderColor = [UIColor colorWithWhite:1.0 alpha:0.16].CGColor;
+    self.layer.shadowColor = UIColor.blackColor.CGColor;
+    self.layer.shadowOpacity = 0.34;
+    self.layer.shadowRadius = 18.0;
+    self.layer.shadowOffset = CGSizeMake(0, 8);
+    self.clipsToBounds = NO;
+
+    _headerView = [[UIView alloc] init];
+    _headerView.backgroundColor = UIColor.clearColor;
+    [self addSubview:_headerView];
+
+    UILabel *title = [[UILabel alloc] init];
+    title.text = @"VCAM  ·  ENCUADRE";
+    title.textColor = [UIColor colorWithWhite:1.0 alpha:0.94];
+    title.font = [UIFont systemFontOfSize:11 weight:UIFontWeightBold];
+    title.textAlignment = NSTextAlignmentLeft;
+    [_headerView addSubview:title];
+    title.tag = 4802;
+
+    _closeButton = [UIButton buttonWithType:UIButtonTypeSystem];
+    [_closeButton setTitle:@"×" forState:UIControlStateNormal];
+    [_closeButton setTitleColor:[UIColor colorWithWhite:1.0 alpha:0.9] forState:UIControlStateNormal];
+    _closeButton.titleLabel.font = [UIFont systemFontOfSize:22 weight:UIFontWeightRegular];
+    [_closeButton addTarget:self action:@selector(closeTapped) forControlEvents:UIControlEventTouchUpInside];
+    [_headerView addSubview:_closeButton];
+
+    _dragGesture = [[UIPanGestureRecognizer alloc] initWithTarget:self action:@selector(handlePanelPan:)];
+    _dragGesture.maximumNumberOfTouches = 1;
+    _dragGesture.cancelsTouchesInView = NO;
+    [_headerView addGestureRecognizer:_dragGesture];
+
+    _previewContainer = [[UIView alloc] init];
+    _previewContainer.backgroundColor = [UIColor colorWithWhite:0.0 alpha:1.0];
+    _previewContainer.layer.cornerRadius = 11.0;
+    _previewContainer.layer.borderWidth = 1.0;
+    _previewContainer.layer.borderColor = [UIColor colorWithWhite:1.0 alpha:0.12].CGColor;
+    _previewContainer.clipsToBounds = YES;
+    [self addSubview:_previewContainer];
+
+    _previewImageView = [[UIImageView alloc] init];
+    _previewImageView.contentMode = UIViewContentModeScaleToFill;
+    _previewImageView.clipsToBounds = YES;
+    [_previewContainer addSubview:_previewImageView];
+
+    _placeholderLabel = [[UILabel alloc] init];
+    _placeholderLabel.text = @"Selecciona una foto o vídeo";
+    _placeholderLabel.textColor = [UIColor colorWithWhite:1.0 alpha:0.58];
+    _placeholderLabel.font = [UIFont systemFontOfSize:11 weight:UIFontWeightMedium];
+    _placeholderLabel.textAlignment = NSTextAlignmentCenter;
+    _placeholderLabel.numberOfLines = 2;
+    [_previewContainer addSubview:_placeholderLabel];
 
     UIButton *up = [self controlButton:@"↑" action:@selector(moveUp)];
     UIButton *left = [self controlButton:@"←" action:@selector(moveLeft)];
-    UIButton *center = [self controlButton:@"•" action:@selector(resetTransform)];
+    UIButton *reset = [self controlButton:@"↺" action:@selector(resetTransform)];
     UIButton *right = [self controlButton:@"→" action:@selector(moveRight)];
     UIButton *down = [self controlButton:@"↓" action:@selector(moveDown)];
-
-    UIStackView *row1 = [[UIStackView alloc] initWithArrangedSubviews:@[up]];
-    UIStackView *row2 = [[UIStackView alloc] initWithArrangedSubviews:@[left, center, right]];
-    UIStackView *row3 = [[UIStackView alloc] initWithArrangedSubviews:@[down]];
-    row1.alignment = row2.alignment = row3.alignment = UIStackViewAlignmentCenter;
-    row1.distribution = row2.distribution = row3.distribution = UIStackViewDistributionEqualSpacing;
-    row1.spacing = row2.spacing = row3.spacing = 14;
+    up.tag = 4810;
+    left.tag = 4811;
+    reset.tag = 4812;
+    right.tag = 4813;
+    down.tag = 4814;
+    [self addSubview:up];
+    [self addSubview:left];
+    [self addSubview:reset];
+    [self addSubview:right];
+    [self addSubview:down];
 
     UIButton *zoomOut = [self controlButton:@"−" action:@selector(zoomOut)];
     UIButton *zoomIn = [self controlButton:@"+" action:@selector(zoomIn)];
-    UILabel *zoomLabel = [[UILabel alloc] init];
-    zoomLabel.text = [NSString stringWithFormat:@"Zoom %.1fx", g_vcamZoom];
-    zoomLabel.font = [UIFont monospacedDigitSystemFontOfSize:16 weight:UIFontWeightSemibold];
-    zoomLabel.textAlignment = NSTextAlignmentCenter;
-    zoomLabel.tag = 4801;
-    UIStackView *zoomRow = [[UIStackView alloc] initWithArrangedSubviews:@[zoomOut, zoomLabel, zoomIn]];
-    zoomRow.alignment = UIStackViewAlignmentCenter;
-    zoomRow.distribution = UIStackViewDistributionEqualSpacing;
-    zoomRow.spacing = 18;
+    zoomOut.tag = 4815;
+    zoomIn.tag = 4816;
+    [self addSubview:zoomOut];
+    [self addSubview:zoomIn];
 
-    UIButton *done = [UIButton buttonWithType:UIButtonTypeSystem];
-    [done setTitle:@"Listo" forState:UIControlStateNormal];
-    done.titleLabel.font = [UIFont systemFontOfSize:17 weight:UIFontWeightSemibold];
-    [done addTarget:self action:@selector(closePanel) forControlEvents:UIControlEventTouchUpInside];
+    _zoomLabel = [[UILabel alloc] init];
+    _zoomLabel.textColor = [UIColor colorWithWhite:1.0 alpha:0.9];
+    _zoomLabel.font = [UIFont monospacedDigitSystemFontOfSize:12 weight:UIFontWeightSemibold];
+    _zoomLabel.textAlignment = NSTextAlignmentCenter;
+    [self addSubview:_zoomLabel];
 
-    UIStackView *stack = [[UIStackView alloc] initWithArrangedSubviews:@[description, row1, row2, row3, zoomRow, done]];
-    stack.axis = UILayoutConstraintAxisVertical;
-    stack.alignment = UIStackViewAlignmentCenter;
-    stack.distribution = UIStackViewDistributionEqualSpacing;
-    stack.spacing = 18;
-    stack.translatesAutoresizingMaskIntoConstraints = NO;
-    [self.view addSubview:stack];
+    [self refreshFraming];
+    [self reloadPreview];
+    return self;
+}
 
-    [NSLayoutConstraint activateConstraints:@[
-        [stack.leadingAnchor constraintEqualToAnchor:self.view.leadingAnchor constant:20],
-        [stack.trailingAnchor constraintEqualToAnchor:self.view.trailingAnchor constant:-20],
-        [stack.centerYAnchor constraintEqualToAnchor:self.view.centerYAnchor],
-        [description.widthAnchor constraintEqualToAnchor:stack.widthAnchor]
-    ]];
+- (void)layoutSubviews {
+    [super layoutSubviews];
+
+    CGFloat width = CGRectGetWidth(self.bounds);
+    self.headerView.frame = CGRectMake(0, 0, width, 36);
+    UILabel *title = [self.headerView viewWithTag:4802];
+    title.frame = CGRectMake(14, 0, width - 60, 36);
+    self.closeButton.frame = CGRectMake(width - 38, 1, 34, 34);
+
+    CGFloat previewWidth = width - 28;
+    self.previewContainer.frame = CGRectMake(14, 42, previewWidth, 108);
+    self.placeholderLabel.frame = self.previewContainer.bounds;
+
+    CGFloat centerX = width * 0.5;
+    CGFloat controlWidth = 36.0;
+    CGFloat controlHeight = 28.0;
+    [self viewWithTag:4810].frame = CGRectMake(centerX - controlWidth * 0.5, 156, controlWidth, controlHeight);
+    [self viewWithTag:4811].frame = CGRectMake(centerX - 40 - controlWidth * 0.5, 188, controlWidth, controlHeight);
+    [self viewWithTag:4812].frame = CGRectMake(centerX - controlWidth * 0.5, 188, controlWidth, controlHeight);
+    [self viewWithTag:4813].frame = CGRectMake(centerX + 40 - controlWidth * 0.5, 188, controlWidth, controlHeight);
+    [self viewWithTag:4814].frame = CGRectMake(centerX - controlWidth * 0.5, 220, controlWidth, controlHeight);
+
+    [self viewWithTag:4815].frame = CGRectMake(centerX - 66, 258, 38, 27);
+    self.zoomLabel.frame = CGRectMake(centerX - 25, 258, 50, 27);
+    [self viewWithTag:4816].frame = CGRectMake(centerX + 28, 258, 38, 27);
+
+    [self refreshFraming];
+}
+
+- (void)refreshFraming {
+    self.zoomLabel.text = [NSString stringWithFormat:@"%.1fx", g_vcamZoom];
+    UIImage *image = self.previewImageView.image;
+    if (!image || CGRectIsEmpty(self.previewContainer.bounds)) return;
+
+    CGSize imageSize = image.size;
+    if (imageSize.width <= 0.0 || imageSize.height <= 0.0) return;
+
+    CGFloat width = CGRectGetWidth(self.previewContainer.bounds);
+    CGFloat height = CGRectGetHeight(self.previewContainer.bounds);
+    CGFloat scale = MAX(width / imageSize.width, height / imageSize.height) * g_vcamZoom;
+    CGFloat renderedWidth = imageSize.width * scale;
+    CGFloat renderedHeight = imageSize.height * scale;
+    CGFloat centerX = width * 0.5 + g_vcamOffsetX * width;
+    CGFloat centerY = height * 0.5 - g_vcamOffsetY * height;
+    self.previewImageView.frame = CGRectMake(centerX - renderedWidth * 0.5,
+                                             centerY - renderedHeight * 0.5,
+                                             renderedWidth,
+                                             renderedHeight);
+}
+
+- (void)reloadPreview {
+    NSString *path = [VCamSharedState sharedState].mediaPath;
+    NSString *mediaType = [VCamSharedState sharedState].mediaType ?: @"";
+    if (path.length == 0) {
+        self.previewImageView.image = nil;
+        self.placeholderLabel.hidden = NO;
+        [self refreshFraming];
+        return;
+    }
+
+    self.placeholderLabel.text = [mediaType isEqualToString:@"video"]
+        ? @"Preparando vista previa…"
+        : @"Cargando imagen…";
+    self.placeholderLabel.hidden = NO;
+
+    __weak typeof(self) weakSelf = self;
+    dispatch_async(dispatch_get_global_queue(QOS_CLASS_USER_INITIATED, 0), ^{
+        @autoreleasepool {
+            UIImage *preview = nil;
+            if ([mediaType isEqualToString:@"image"]) {
+                preview = [UIImage imageWithContentsOfFile:path];
+            } else if ([mediaType isEqualToString:@"video"]) {
+                AVURLAsset *asset = [AVURLAsset URLAssetWithURL:[NSURL fileURLWithPath:path] options:nil];
+                AVAssetImageGenerator *generator = [[AVAssetImageGenerator alloc] initWithAsset:asset];
+                generator.appliesPreferredTrackTransform = YES;
+                generator.maximumSize = CGSizeMake(640, 360);
+                NSError *error = nil;
+                CGImageRef frame = [generator copyCGImageAtTime:CMTimeMakeWithSeconds(0.25, 600)
+                                                     actualTime:NULL
+                                                          error:&error];
+                if (frame) {
+                    preview = [UIImage imageWithCGImage:frame];
+                    CGImageRelease(frame);
+                } else if (error) {
+                    NSLog(@"[VCam Pro] No se pudo generar la miniatura del vídeo: %@", error);
+                }
+            }
+
+            dispatch_async(dispatch_get_main_queue(), ^{
+                VCamAdjustmentPanel *strongSelf = weakSelf;
+                if (!strongSelf) return;
+                NSString *currentPath = [VCamSharedState sharedState].mediaPath;
+                if (![currentPath isEqualToString:path]) return;
+
+                strongSelf.previewImageView.image = preview;
+                strongSelf.placeholderLabel.hidden = (preview != nil);
+                strongSelf.placeholderLabel.text = preview
+                    ? @""
+                    : @"No se pudo generar la vista previa";
+                [strongSelf setNeedsLayout];
+                [strongSelf refreshFraming];
+            });
+        }
+    });
 }
 
 - (void)publishTransform {
     g_vcamZoom = MAX(0.5, MIN(4.0, g_vcamZoom));
     g_vcamOffsetX = MAX(-1.0, MIN(1.0, g_vcamOffsetX));
     g_vcamOffsetY = MAX(-1.0, MIN(1.0, g_vcamOffsetY));
-    [[MediaManager sharedManager] setZoom:g_vcamZoom offsetX:g_vcamOffsetX offsetY:g_vcamOffsetY];
-    VCamPostControlAsync(@{@"zoom": @(g_vcamZoom), @"offsetX": @(g_vcamOffsetX), @"offsetY": @(g_vcamOffsetY)});
-    UILabel *label = [self.view viewWithTag:4801];
-    label.text = [NSString stringWithFormat:@"Zoom %.1fx", g_vcamZoom];
+    VCamPostControlAsync(@{
+        @"zoom": @(g_vcamZoom),
+        @"offsetX": @(g_vcamOffsetX),
+        @"offsetY": @(g_vcamOffsetY)
+    });
+    [self refreshFraming];
 }
 
-- (void)moveUp { g_vcamOffsetY -= 0.06; [self publishTransform]; }
-- (void)moveDown { g_vcamOffsetY += 0.06; [self publishTransform]; }
+- (void)moveUp { g_vcamOffsetY += 0.06; [self publishTransform]; }
+- (void)moveDown { g_vcamOffsetY -= 0.06; [self publishTransform]; }
 - (void)moveLeft { g_vcamOffsetX -= 0.06; [self publishTransform]; }
 - (void)moveRight { g_vcamOffsetX += 0.06; [self publishTransform]; }
-
 - (void)zoomIn { g_vcamZoom += 0.1; [self publishTransform]; }
 - (void)zoomOut { g_vcamZoom -= 0.1; [self publishTransform]; }
 
@@ -1133,11 +1276,60 @@ static NSData *VCamEncodeJPEGAsUTI(NSData *jpegData, NSString *uti) {
     [self publishTransform];
 }
 
-- (void)closePanel {
-    [self dismissViewControllerAnimated:YES completion:nil];
+- (void)handlePanelPan:(UIPanGestureRecognizer *)gesture {
+    UIView *container = self.superview;
+    if (!container) return;
+
+    CGPoint translation = [gesture translationInView:container];
+    CGRect frame = self.frame;
+    frame.origin.x += translation.x;
+    frame.origin.y += translation.y;
+    frame.origin.x = MAX(8.0, MIN(CGRectGetWidth(container.bounds) - CGRectGetWidth(frame) - 8.0, frame.origin.x));
+    frame.origin.y = MAX(8.0, MIN(CGRectGetHeight(container.bounds) - CGRectGetHeight(frame) - 8.0, frame.origin.y));
+    self.frame = frame;
+    [gesture setTranslation:CGPointZero inView:container];
+}
+
+- (void)closeTapped {
+    VCamCloseAdjustmentPanel();
 }
 
 @end
+
+static void VCamCloseAdjustmentPanel(void) {
+    if (!g_adjustmentPanel) return;
+    if ([g_overlayWindow isKindOfClass:[VCamPassthroughWindow class]]) {
+        ((VCamPassthroughWindow *)g_overlayWindow).interactivePanel = nil;
+    }
+    [g_adjustmentPanel removeFromSuperview];
+    g_adjustmentPanel = nil;
+    g_adjustmentPreviewRevision = -1;
+}
+
+static void VCamShowAdjustmentPanel(void) {
+    if (!g_overlayController || !g_overlayWindow ||
+        [UIApplication sharedApplication].applicationState != UIApplicationStateActive) return;
+
+    if (g_adjustmentPanel) {
+        [g_adjustmentPanel reloadPreview];
+        [g_adjustmentPanel refreshFraming];
+        return;
+    }
+
+    CGFloat width = MIN(244.0, CGRectGetWidth(g_overlayController.view.bounds) - 20.0);
+    CGFloat height = 294.0;
+    CGFloat x = MAX(10.0, CGRectGetWidth(g_overlayController.view.bounds) - width - 14.0);
+    CGFloat y = MAX(50.0, CGRectGetHeight(g_overlayController.view.bounds) - height - 92.0);
+
+    g_adjustmentPanel = [[VCamAdjustmentPanel alloc] initWithFrame:CGRectMake(x, y, width, height)];
+    g_adjustmentPanel.autoresizingMask = UIViewAutoresizingFlexibleLeftMargin |
+                                         UIViewAutoresizingFlexibleTopMargin;
+    [g_overlayController.view addSubview:g_adjustmentPanel];
+    if ([g_overlayWindow isKindOfClass:[VCamPassthroughWindow class]]) {
+        ((VCamPassthroughWindow *)g_overlayWindow).interactivePanel = g_adjustmentPanel;
+    }
+    g_adjustmentPreviewRevision = [VCamSharedState sharedState].mediaRevision;
+}
 
 #pragma mark - Media Picker Delegate
 
