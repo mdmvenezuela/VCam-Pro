@@ -14,6 +14,8 @@
 #import <sys/time.h>
 #import <unistd.h>
 #import <errno.h>
+#import <fcntl.h>
+#import <sys/stat.h>
 
 #import "VCamMediaServerSource.h"
 
@@ -42,6 +44,33 @@ static _Atomic(uint32_t) g_vcmUnreplacedCount = 0;
 static const uint16_t kVCMStatusPort = 47831;
 
 static _Atomic(uint32_t) g_vcmOrientationDiagnosticCount = 0;
+
+static void VCMAppendOrientationDiagnostic(NSString *message) {
+    if (![message isKindOfClass:[NSString class]] || message.length == 0) return;
+    const char *directory = "/var/mobile/Downloads";
+    mkdir(directory, 0755);
+    const char *path = "/var/mobile/Downloads/VCam-OrientationDiag.log";
+    int fd = open(path, O_WRONLY | O_CREAT | O_APPEND, 0644);
+    if (fd < 0) {
+        NSLog(@"[VCam Pro/OrientationDiag] No se pudo abrir el archivo de diagnóstico: %s", strerror(errno));
+        return;
+    }
+    NSString *line = [message stringByAppendingString:@"\\n"];
+    NSData *data = [line dataUsingEncoding:NSUTF8StringEncoding];
+    const uint8_t *bytes = data.bytes;
+    size_t remaining = data.length;
+    while (remaining > 0) {
+        ssize_t written = write(fd, bytes, remaining);
+        if (written < 0) {
+            if (errno == EINTR) continue;
+            break;
+        }
+        if (written == 0) break;
+        bytes += written;
+        remaining -= (size_t)written;
+    }
+    close(fd);
+}
 
 static NSString *VCMDescribeDictionaryKeys(CFDictionaryRef dictionary) {
     if (!dictionary) return @"[]";
@@ -90,19 +119,22 @@ static void VCMLogCameraFrameContract(id object, CMSampleBufferRef sampleBuffer,
     CFDictionaryRef perSampleDictionary = perSample && CFArrayGetCount(perSample) > 0
         ? (CFDictionaryRef)CFArrayGetValueAtIndex(perSample, 0) : NULL;
 
-    NSLog(@"[VCam Pro/OrientationDiag] #%u node=%s pixel=%zux%zu format=%dx%d pixelFormat=%u formatExt=%@ pixelProp=%@ pixelNoProp=%@ sampleProp=%@ sampleEntry=%@",
-          index + 1,
-          object_getClassName(object),
-          CVPixelBufferGetWidth(pixelBuffer),
-          CVPixelBufferGetHeight(pixelBuffer),
-          formatDimensions.width,
-          formatDimensions.height,
-          (unsigned int)CVPixelBufferGetPixelFormatType(pixelBuffer),
-          VCMDescribeDictionaryKeys(formatExtensions),
-          VCMDescribeDictionaryKeys(propagated),
-          VCMDescribeDictionaryKeys(nonPropagated),
-          VCMDescribeDictionaryKeys(sampleAttachments),
-          VCMDescribeDictionaryKeys(perSampleDictionary));
+    NSString *diagnostic = [NSString stringWithFormat:
+        @"[VCam Pro/OrientationDiag] #%u node=%s pixel=%zux%zu format=%dx%d pixelFormat=%u formatExt=%@ pixelProp=%@ pixelNoProp=%@ sampleProp=%@ sampleEntry=%@",
+        index + 1,
+        object_getClassName(object),
+        CVPixelBufferGetWidth(pixelBuffer),
+        CVPixelBufferGetHeight(pixelBuffer),
+        formatDimensions.width,
+        formatDimensions.height,
+        (unsigned int)CVPixelBufferGetPixelFormatType(pixelBuffer),
+        VCMDescribeDictionaryKeys(formatExtensions),
+        VCMDescribeDictionaryKeys(propagated),
+        VCMDescribeDictionaryKeys(nonPropagated),
+        VCMDescribeDictionaryKeys(sampleAttachments),
+        VCMDescribeDictionaryKeys(perSampleDictionary)];
+    NSLog(@"%@", diagnostic);
+    VCMAppendOrientationDiagnostic(diagnostic);
 
     if (sampleAttachments) CFRelease(sampleAttachments);
 }
