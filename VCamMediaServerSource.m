@@ -23,6 +23,32 @@ static NSString * const kVCamSystemReplacementAttachment =
 
 static _Atomic(uint32_t) g_vcmRenderDiagnosticCount = 0;
 
+static void VCMAppendRenderDiagnostic(NSString *message) {
+    if (![message isKindOfClass:[NSString class]] || message.length == 0) return;
+    mkdir("/var/mobile/Downloads", 0755);
+    int fd = open("/var/mobile/Downloads/VCam-OrientationDiag.log",
+                  O_WRONLY | O_CREAT | O_APPEND, 0644);
+    if (fd < 0) {
+        NSLog(@"[VCam Pro/OrientationDiag] No se pudo abrir el archivo de diagnóstico: %s", strerror(errno));
+        return;
+    }
+    NSString *line = [message stringByAppendingString:@"\n"];
+    NSData *data = [line dataUsingEncoding:NSUTF8StringEncoding];
+    const uint8_t *bytes = data.bytes;
+    size_t remaining = data.length;
+    while (remaining > 0) {
+        ssize_t written = write(fd, bytes, remaining);
+        if (written < 0) {
+            if (errno == EINTR) continue;
+            break;
+        }
+        if (written == 0) break;
+        bytes += written;
+        remaining -= (size_t)written;
+    }
+    close(fd);
+}
+
 static BOOL VCMWriteAll(int fd, const void *bytes, size_t length) {
     const uint8_t *cursor = (const uint8_t *)bytes;
     size_t offset = 0;
@@ -959,18 +985,21 @@ static void VCMSharedStateDidChange(CFNotificationCenterRef center,
     uint32_t renderDiagnostic = atomic_fetch_add_explicit(
         &g_vcmRenderDiagnosticCount, 1, memory_order_relaxed);
     if (renderDiagnostic < 24) {
-        NSLog(@"[VCam Pro/OrientationDiag] render #%u media=%@ source=%.1fx%.1f target=%zux%zu rotation=%ld mirror=%d preferred=[%.3f %.3f %.3f %.3f %.3f %.3f]",
-              renderDiagnostic + 1,
-              videoMode ? @"video" : @"image",
-              sourceImage.extent.size.width,
-              sourceImage.extent.size.height,
-              CVPixelBufferGetWidth(templateBuffer),
-              CVPixelBufferGetHeight(templateBuffer),
-              (long)rotationDegrees,
-              mirrorEnabled,
-              preferredTransform.a, preferredTransform.b,
-              preferredTransform.c, preferredTransform.d,
-              preferredTransform.tx, preferredTransform.ty);
+        NSString *diagnostic = [NSString stringWithFormat:
+            @"[VCam Pro/OrientationDiag] render #%u media=%@ source=%.1fx%.1f target=%zux%zu rotation=%ld mirror=%d preferred=[%.3f %.3f %.3f %.3f %.3f %.3f]",
+            renderDiagnostic + 1,
+            videoMode ? @"video" : @"image",
+            sourceImage.extent.size.width,
+            sourceImage.extent.size.height,
+            CVPixelBufferGetWidth(templateBuffer),
+            CVPixelBufferGetHeight(templateBuffer),
+            (long)rotationDegrees,
+            mirrorEnabled,
+            preferredTransform.a, preferredTransform.b,
+            preferredTransform.c, preferredTransform.d,
+            preferredTransform.tx, preferredTransform.ty];
+        NSLog(@"%@", diagnostic);
+        VCMAppendRenderDiagnostic(diagnostic);
     }
 
     NSInteger normalizedRotation = ((rotationDegrees % 360) + 360) % 360;
