@@ -422,6 +422,14 @@ static BOOL VCMDownloadMedia(NSString *destinationPath) {
     if (_reader.status == AVAssetReaderStatusReading) [_reader cancelReading];
 }
 
+- (BOOL)isReplacementEnabled {
+    [_lock lock];
+    BOOL enabled = _enabled && !_loading &&
+        (_stillImage != nil || [_mediaType isEqualToString:@"video"]);
+    [_lock unlock];
+    return enabled;
+}
+
 - (void)startMonitoring {
     dispatch_async(_monitorQueue, ^{
         if (self->_monitorTimer) return;
@@ -688,7 +696,9 @@ static BOOL VCMDownloadMedia(NSString *destinationPath) {
                 if (pixelBuffer) {
                     VCMVideoFrame *frame = [[VCMVideoFrame alloc] initWithPixelBuffer:pixelBuffer];
                     [self->_lock lock];
-                    [self->_videoFrames addObject:frame];
+                    if (self->_enabled && [self->_mediaType isEqualToString:@"video"]) {
+                        [self->_videoFrames addObject:frame];
+                    }
                     [self->_lock unlock];
                 }
                 CFRelease(sample);
