@@ -1017,10 +1017,11 @@ static void VCMSharedStateDidChange(CFNotificationCenterRef center,
                                      pixelFormat:pixelFormat];
     if (!replacementBuffer) return NULL;
 
-    CVBufferPropagateAttachments(templateBuffer, replacementBuffer);
-    // Preserve the original camera's orientation contract. The replacement
-    // keeps the template pixel dimensions and must carry the same orientation
-    // attachments so each AVFoundation client presents it consistently.
+    // The replacement pixels are fully rasterized into the target dimensions.
+    // Do not inherit camera-buffer attachments: some clients interpret those
+    // source orientation/transform hints after receiving the already-rendered
+    // pixels, producing a second rotation. The replacement buffer starts with
+    // neutral metadata; MediaServer.x only forwards safe sample attachments.
     @try {
         [_ciContext render:cropped
            toCVPixelBuffer:replacementBuffer
