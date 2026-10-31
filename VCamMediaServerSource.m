@@ -15,6 +15,7 @@
 #import <string.h>
 #import <stdlib.h>
 #import <limits.h>
+#import <stdatomic.h>
 
 static const uint16_t kVCamMediaServerPort = 47831;
 static NSString * const kVCamSystemReplacementAttachment =
