@@ -9,14 +9,13 @@ include $(THEOS)/makefiles/common.mk
 
 TWEAK_NAME = VCam
 
-VCam_FILES = Tweak.xm MediaManager.m
+VCam_FILES = Tweak.xm MediaManager.m VCamSharedState.m
 
 VCam_CFLAGS = -fobjc-arc
 VCam_CXXFLAGS = -fobjc-arc -std=c++17
 VCam_LDFLAGS = -std=c++17
 
-VCam_FRAMEWORKS = UIKit AVFoundation CoreMedia CoreVideo CoreImage MobileCoreServices
-
+VCam_FRAMEWORKS = UIKit AVFoundation CoreMedia CoreVideo CoreImage MobileCoreServices QuartzCore
 VCam_PRIVATE_FRAMEWORKS =
 
 include $(THEOS_MAKE_PATH)/tweak.mk
