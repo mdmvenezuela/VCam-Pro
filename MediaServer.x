@@ -173,10 +173,19 @@ static VCMEmitSampleBufferFunction VCMOriginalForObject(id object, SEL selector)
     return NULL;
 }
 
+static BOOL VCMIsOrientationMetadataKey(CFStringRef key) {
+    if (!key || CFGetTypeID(key) != CFStringGetTypeID()) return NO;
+    return CFStringFind(key, CFSTR("orientation"), kCFCompareCaseInsensitive).location != kCFNotFound ||
+           CFStringFind(key, CFSTR("rotation"), kCFCompareCaseInsensitive).location != kCFNotFound ||
+           CFStringFind(key, CFSTR("transform"), kCFCompareCaseInsensitive).location != kCFNotFound;
+}
+
 static void VCMCopyAttachmentEntry(const void *key,
                                     const void *value,
                                     void *context) {
-    if (key && value && context) {
+    // Keep color/timing/camera metadata, but not orientation instructions.
+    if (key && value && context &&
+        !VCMIsOrientationMetadataKey((CFStringRef)key)) {
         CFDictionarySetValue((CFMutableDictionaryRef)context, key, value);
     }
 }
@@ -186,27 +195,17 @@ static CMSampleBufferRef VCMCreateReplacementSampleBuffer(
     CVPixelBufferRef replacementPixelBuffer) CF_RETURNS_RETAINED {
     if (!originalBuffer || !replacementPixelBuffer) return NULL;
 
-    CMFormatDescriptionRef originalDescription =
-        CMSampleBufferGetFormatDescription(originalBuffer);
+    // Describe the rendered buffer from its actual pixel dimensions. Reusing
+    // the camera format can retain orientation extensions in some pipelines.
     CMVideoFormatDescriptionRef replacementDescription = NULL;
-
-    if (originalDescription &&
-        CMFormatDescriptionGetMediaType(originalDescription) == kCMMediaType_Video &&
-        CMVideoFormatDescriptionMatchesImageBuffer(
-            (CMVideoFormatDescriptionRef)originalDescription,
-            replacementPixelBuffer)) {
-        replacementDescription =
-            (CMVideoFormatDescriptionRef)CFRetain(originalDescription);
-    } else {
-        OSStatus formatStatus = CMVideoFormatDescriptionCreateForImageBuffer(
-            kCFAllocatorDefault,
-            replacementPixelBuffer,
-            &replacementDescription);
-        if (formatStatus != noErr || !replacementDescription) {
-            NSLog(@"[VCam Pro/MediaServer] No se pudo crear el formato del fotograma sustituido (%d).",
-                  (int)formatStatus);
-            return NULL;
-        }
+    OSStatus formatStatus = CMVideoFormatDescriptionCreateForImageBuffer(
+        kCFAllocatorDefault,
+        replacementPixelBuffer,
+        &replacementDescription);
+    if (formatStatus != noErr || !replacementDescription) {
+        NSLog(@"[VCam Pro/MediaServer] No se pudo crear el formato del fotograma sustituido (%d).",
+              (int)formatStatus);
+        return NULL;
     }
 
     CMSampleTimingInfo timing = {
@@ -246,9 +245,17 @@ static CMSampleBufferRef VCMCreateReplacementSampleBuffer(
         originalBuffer,
         kCMAttachmentMode_ShouldPropagate);
     if (bufferAttachments) {
-        CMSetAttachments(replacementSampleBuffer,
-                         bufferAttachments,
-                         kCMAttachmentMode_ShouldPropagate);
+        CFMutableDictionaryRef safeAttachments = CFDictionaryCreateMutable(
+            kCFAllocatorDefault, 0, &kCFTypeDictionaryKeyCallBacks,
+            &kCFTypeDictionaryValueCallBacks);
+        if (safeAttachments) {
+            CFDictionaryApplyFunction(bufferAttachments, VCMCopyAttachmentEntry,
+                                      safeAttachments);
+            CMSetAttachments(replacementSampleBuffer,
+                             safeAttachments,
+                             kCMAttachmentMode_ShouldPropagate);
+            CFRelease(safeAttachments);
+        }
         CFRelease(bufferAttachments);
     }
 
