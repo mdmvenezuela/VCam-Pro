@@ -50,6 +50,8 @@ static BOOL VCamSendAll(int socketFD, const void *bytes, size_t length) {
     CGFloat _offsetX;
     CGFloat _offsetY;
     NSInteger _rotationDegrees;
+    BOOL _mirrorEnabled;
+    BOOL _motionEnabled;
     CGFloat _buttonX;
     CGFloat _buttonY;
     NSString *_engineStatus;
@@ -112,6 +114,8 @@ static BOOL VCamSendAll(int socketFD, const void *bytes, size_t length) {
             _offsetY = MAX(-1.0, MIN(1.0, [saved[@"offsetY"] doubleValue]));
             _rotationDegrees = (([saved[@"rotationDegrees"] integerValue] % 360) + 360) % 360;
             _rotationDegrees = ((_rotationDegrees + 45) / 90 * 90) % 360;
+            _mirrorEnabled = [saved[@"mirrorEnabled"] boolValue];
+            _motionEnabled = [saved[@"motionEnabled"] boolValue];
             _buttonX = MAX(0.04, MIN(0.96, [saved[@"buttonX"] doubleValue] ?: 0.92));
             _buttonY = MAX(0.04, MIN(0.96, [saved[@"buttonY"] doubleValue] ?: 0.24));
         }
@@ -239,6 +243,8 @@ static BOOL VCamSendAll(int socketFD, const void *bytes, size_t length) {
         @"offsetX": @(_offsetX),
         @"offsetY": @(_offsetY),
         @"rotationDegrees": @(_rotationDegrees),
+        @"mirrorEnabled": @(_mirrorEnabled),
+        @"motionEnabled": @(_motionEnabled),
         @"buttonX": @(_buttonX),
         @"buttonY": @(_buttonY),
         @"engineStatus": _engineStatus ?: @"not_reported",
@@ -361,6 +367,24 @@ static BOOL VCamSendAll(int socketFD, const void *bytes, size_t length) {
 - (void)setEnabled:(BOOL)enabled {
     [_stateLock lock];
     _enabled = enabled;
+    _stateRevision += 1;
+    [self persistLocked];
+    [_stateLock unlock];
+    [self publishChange];
+}
+
+- (void)setMirrorEnabled:(BOOL)enabled {
+    [_stateLock lock];
+    _mirrorEnabled = enabled;
+    _stateRevision += 1;
+    [self persistLocked];
+    [_stateLock unlock];
+    [self publishChange];
+}
+
+- (void)setMotionEnabled:(BOOL)enabled {
+    [_stateLock lock];
+    _motionEnabled = enabled;
     _stateRevision += 1;
     [self persistLocked];
     [_stateLock unlock];
@@ -496,6 +520,8 @@ static BOOL VCamSendAll(int socketFD, const void *bytes, size_t length) {
     NSNumber *offsetX = control[@"offsetX"];
     NSNumber *offsetY = control[@"offsetY"];
     NSNumber *rotationDegrees = control[@"rotationDegrees"];
+    NSNumber *mirrorEnabled = control[@"mirrorEnabled"];
+    NSNumber *motionEnabled = control[@"motionEnabled"];
     NSNumber *buttonX = control[@"buttonX"];
     NSNumber *buttonY = control[@"buttonY"];
 
@@ -513,6 +539,8 @@ static BOOL VCamSendAll(int socketFD, const void *bytes, size_t length) {
         NSInteger normalized = ((rotationDegrees.integerValue % 360) + 360) % 360;
         _rotationDegrees = ((normalized + 45) / 90 * 90) % 360;
     }
+    if ([mirrorEnabled isKindOfClass:[NSNumber class]]) _mirrorEnabled = mirrorEnabled.boolValue;
+    if ([motionEnabled isKindOfClass:[NSNumber class]]) _motionEnabled = motionEnabled.boolValue;
     if ([buttonX isKindOfClass:[NSNumber class]] && isfinite(buttonX.doubleValue)) {
         _buttonX = MAX(0.04, MIN(0.96, buttonX.doubleValue));
     }
