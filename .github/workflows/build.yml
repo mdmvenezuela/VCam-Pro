@@ -15,11 +15,18 @@ permissions:
 jobs:
   build:
     name: Build iOS Tweak for RootHide
-    runs-on: macos-14
+    runs-on: macos-15
 
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
+
+      - name: Show runner environment
+        run: |
+          set -euo pipefail
+          sw_vers
+          uname -m
+          xcodebuild -version
 
       - name: Install dependencies
         run: |
