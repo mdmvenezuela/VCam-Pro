@@ -40,6 +40,8 @@ static CGFloat g_vcamButtonY = 0.24;
 static NSInteger g_lastMediaRevision = -1;
 static NSInteger g_loadingMediaRevision = -1;
 static NSInteger g_failedMediaRevision = -1;
+static NSInteger g_mediaLoadAttemptRevision = -1;
+static NSUInteger g_mediaLoadAttemptCount = 0;
 static dispatch_queue_t g_syncQueue;
 static UIWindow *g_overlayWindow = nil;
 static UIViewController *g_overlayController = nil;
@@ -431,20 +433,45 @@ static void VCamRefreshFromServer(void) {
         [manager setZoom:g_vcamZoom offsetX:g_vcamOffsetX offsetY:g_vcamOffsetY];
         [manager setRotationDegrees:g_vcamRotationDegrees];
 
+        if (enabled &&
+            application.applicationState == UIApplicationStateActive &&
+            manager.isReady &&
+            manager.mode == VCamMediaModePhoto) {
+            NSData *updatedStillJPEG = [manager nextPhotoData];
+            if (updatedStillJPEG) VCamUpdatePreviewOverlaysWithJPEG(updatedStillJPEG);
+        }
+
         if (!enabled) {
             [manager stop];
             NSLog(@"[VCam Pro] Estado remoto desactivado (rev %ld).", (long)stateRevision);
         } else if (mediaRevision > 0 && mediaRevision != g_lastMediaRevision &&
                    mediaRevision != g_failedMediaRevision && g_loadingMediaRevision == -1) {
+            if (g_mediaLoadAttemptRevision != mediaRevision) {
+                g_mediaLoadAttemptRevision = mediaRevision;
+                g_mediaLoadAttemptCount = 0;
+            }
+            g_mediaLoadAttemptCount += 1;
+            NSUInteger mediaLoadAttempt = g_mediaLoadAttemptCount;
             g_loadingMediaRevision = mediaRevision;
             NSString *extension = [state[@"mediaExtension"] isKindOfClass:[NSString class]] ? state[@"mediaExtension"] : @"mp4";
             NSString *mediaType = [state[@"mediaType"] isKindOfClass:[NSString class]] ? state[@"mediaType"] : @"video";
             NSString *localPath = VCamDownloadCurrentMedia(extension, mediaRevision);
             if (!localPath) {
                 g_loadingMediaRevision = -1;
-                g_failedMediaRevision = mediaRevision;
-                VCamSetLocalEnabled(NO);
-                VCamRefreshFromServer();
+                if (mediaLoadAttempt >= 5) {
+                    g_failedMediaRevision = mediaRevision;
+                    NSLog(@"[VCam Pro] No se pudo descargar la revisión %ld tras %lu intentos.",
+                          (long)mediaRevision, (unsigned long)mediaLoadAttempt);
+                } else {
+                    NSTimeInterval retryDelay = MIN(2.0, 0.35 * mediaLoadAttempt);
+                    NSLog(@"[VCam Pro] Descarga de revisión %ld fallida; reintento %lu/5 en %.2fs.",
+                          (long)mediaRevision, (unsigned long)(mediaLoadAttempt + 1), retryDelay);
+                    dispatch_after(dispatch_time(DISPATCH_TIME_NOW,
+                                                 (int64_t)(retryDelay * NSEC_PER_SEC)),
+                                   g_syncQueue, ^{
+                        VCamRefreshFromServer();
+                    });
+                }
                 return;
             }
 
@@ -455,7 +482,10 @@ static void VCamRefreshFromServer(void) {
                 if (success && VCamIsEnabled()) {
                     g_lastMediaRevision = mediaRevision;
                     g_failedMediaRevision = -1;
+                    g_mediaLoadAttemptRevision = -1;
+                    g_mediaLoadAttemptCount = 0;
                     [manager setZoom:g_vcamZoom offsetX:g_vcamOffsetX offsetY:g_vcamOffsetY];
+                    [manager setRotationDegrees:g_vcamRotationDegrees];
                     if ([mediaType isEqualToString:@"image"]) {
                         NSData *stillJPEG = [manager nextPhotoData];
                         if (stillJPEG) VCamUpdatePreviewOverlaysWithJPEG(stillJPEG);
@@ -467,12 +497,26 @@ static void VCamRefreshFromServer(void) {
                     }
                     NSLog(@"[VCam Pro] Medio remoto listo en %@ (rev %ld).", [[NSBundle mainBundle] bundleIdentifier], (long)mediaRevision);
                 } else {
-                    if (!success) g_failedMediaRevision = mediaRevision;
-                    VCamSetLocalEnabled(NO);
-                    NSLog(@"[VCam Pro] No se pudo preparar el medio remoto: %@", error);
+                    if (!success) {
+                        if (mediaLoadAttempt >= 5) {
+                            g_failedMediaRevision = mediaRevision;
+                            NSLog(@"[VCam Pro] Falló la carga local de la revisión %ld tras %lu intentos.",
+                                  (long)mediaRevision, (unsigned long)mediaLoadAttempt);
+                        } else {
+                            NSTimeInterval retryDelay = MIN(2.0, 0.35 * mediaLoadAttempt);
+                            NSLog(@"[VCam Pro] Carga de revisión %ld fallida; reintento %lu/5 en %.2fs: %@",
+                                  (long)mediaRevision, (unsigned long)(mediaLoadAttempt + 1),
+                                  retryDelay, error);
+                            dispatch_after(dispatch_time(DISPATCH_TIME_NOW,
+                                                         (int64_t)(retryDelay * NSEC_PER_SEC)),
+                                           g_syncQueue, ^{
+                                VCamRefreshFromServer();
+                            });
+                        }
+                    }
                 }
-                // A newer photo/video may have been selected while this revision loaded.
-                VCamRefreshFromServer();
+                // On success, immediately check whether a newer choice arrived during the load.
+                if (success) VCamRefreshFromServer();
             }];
         } else if (enabled) {
             if (application.applicationState == UIApplicationStateActive && manager.isReady) {
@@ -1587,11 +1631,15 @@ static void VCamShowMenu(void) {
         else [[MediaManager sharedManager] stop];
     }]];
 
-    [menu addAction:[UIAlertAction actionWithTitle:@"Vista previa y encuadre"
+    NSString *framingTitle = g_adjustmentPanel
+        ? @"Cerrar vista previa y encuadre"
+        : @"Vista previa y encuadre";
+    [menu addAction:[UIAlertAction actionWithTitle:framingTitle
                                              style:UIAlertActionStyleDefault
                                            handler:^(UIAlertAction *action) {
         dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.2 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
-            VCamShowAdjustmentPanel();
+            if (g_adjustmentPanel) VCamCloseAdjustmentPanel();
+            else VCamShowAdjustmentPanel();
         });
     }]];
 
