@@ -364,6 +364,7 @@ static BOOL VCMDownloadMedia(NSString *destinationPath) {
     CGFloat _zoom;
     CGFloat _offsetX;
     CGFloat _offsetY;
+    NSInteger _rotationDegrees;
 
     NSString *_mediaType;
     NSString *_mediaPath;
@@ -441,8 +442,8 @@ static BOOL VCMDownloadMedia(NSString *destinationPath) {
                                                      self->_monitorQueue);
         dispatch_source_set_timer(self->_monitorTimer,
                                   dispatch_time(DISPATCH_TIME_NOW, 0),
-                                  (uint64_t)(NSEC_PER_SEC / 10),
-                                  (uint64_t)(NSEC_PER_MSEC * 20));
+                                  (uint64_t)(NSEC_PER_SEC / 30),
+                                  (uint64_t)(NSEC_PER_MSEC * 5));
         dispatch_source_set_event_handler(self->_monitorTimer, ^{
             [self refreshRemoteState];
         });
@@ -482,6 +483,8 @@ static BOOL VCMDownloadMedia(NSString *destinationPath) {
     _zoom = MAX(0.5, MIN(4.0, [state[@"zoom"] doubleValue]));
     _offsetX = MAX(-1.0, MIN(1.0, [state[@"offsetX"] doubleValue]));
     _offsetY = MAX(-1.0, MIN(1.0, [state[@"offsetY"] doubleValue]));
+    NSInteger rotation = (([state[@"rotationDegrees"] integerValue] % 360) + 360) % 360;
+    _rotationDegrees = ((rotation + 45) / 90 * 90) % 360;
 
     BOOL needsLoad = enabled && hasMedia && revision > 0 &&
         revision != _loadedRevision && revision != _loadingRevision &&
@@ -745,6 +748,7 @@ static BOOL VCMDownloadMedia(NSString *destinationPath) {
     CGFloat zoom = _zoom;
     CGFloat offsetX = _offsetX;
     CGFloat offsetY = _offsetY;
+    NSInteger rotationDegrees = _rotationDegrees;
     [_lock unlock];
 
     if (frameToRender.pixelBuffer) {
@@ -763,6 +767,25 @@ static BOOL VCMDownloadMedia(NSString *destinationPath) {
         }
     }
     if (!sourceImage) return NULL;
+
+    NSInteger normalizedRotation = ((rotationDegrees % 360) + 360) % 360;
+    CGImagePropertyOrientation rotationOrientation = kCGImagePropertyOrientationUp;
+    switch (normalizedRotation) {
+        case 90: rotationOrientation = kCGImagePropertyOrientationRight; break;
+        case 180: rotationOrientation = kCGImagePropertyOrientationDown; break;
+        case 270: rotationOrientation = kCGImagePropertyOrientationLeft; break;
+        default: break;
+    }
+    if (rotationOrientation != kCGImagePropertyOrientationUp) {
+        sourceImage = [sourceImage imageByApplyingOrientation:rotationOrientation];
+        CGRect rotatedExtent = sourceImage.extent;
+        if (!CGRectIsEmpty(rotatedExtent) &&
+            (rotatedExtent.origin.x != 0.0 || rotatedExtent.origin.y != 0.0)) {
+            sourceImage = [sourceImage imageByApplyingTransform:
+                CGAffineTransformMakeTranslation(-rotatedExtent.origin.x,
+                                                 -rotatedExtent.origin.y)];
+        }
+    }
 
     size_t width = CVPixelBufferGetWidth(templateBuffer);
     size_t height = CVPixelBufferGetHeight(templateBuffer);
