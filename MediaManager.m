@@ -31,6 +31,8 @@
     CGFloat _offsetX;
     CGFloat _offsetY;
     NSInteger _rotationDegrees;
+    BOOL _mirrorEnabled;
+    BOOL _motionEnabled;
 }
 
 - (BOOL)createReaderLocked:(NSError **)error;
@@ -64,6 +66,8 @@
         _zoom = 1.0;
         _offsetX = 0.0;
         _offsetY = 0.0;
+        _mirrorEnabled = NO;
+        _motionEnabled = NO;
         _preferredTransform = CGAffineTransformIdentity;
         _pendingVideoSample = NULL;
         _lastVideoImage = nil;
@@ -251,6 +255,18 @@
     [_lock unlock];
 }
 
+- (void)setMirrorEnabled:(BOOL)enabled {
+    [_lock lock];
+    _mirrorEnabled = enabled;
+    [_lock unlock];
+}
+
+- (void)setMotionEnabled:(BOOL)enabled {
+    [_lock lock];
+    _motionEnabled = enabled;
+    [_lock unlock];
+}
+
 - (void)start {
     [_lock lock];
     if (_ready) {
@@ -377,13 +393,31 @@
         }
     }
 
+    if (_mirrorEnabled) {
+        image = [image imageByApplyingOrientation:kCGImagePropertyOrientationUpMirrored];
+        extent = image.extent;
+        if (!CGRectIsEmpty(extent) && (extent.origin.x != 0.0 || extent.origin.y != 0.0)) {
+            image = [image imageByApplyingTransform:
+                CGAffineTransformMakeTranslation(-extent.origin.x, -extent.origin.y)];
+            extent = image.extent;
+        }
+    }
+
+    CFTimeInterval motionTime = CACurrentMediaTime();
+    CGFloat motionX = _motionEnabled ? sin(motionTime * 0.72) * 0.0045 : 0.0;
+    CGFloat motionY = _motionEnabled ? cos(motionTime * 0.55) * 0.0035 : 0.0;
+    CGFloat motionScale = _motionEnabled
+        ? 1.018 + sin(motionTime * 0.35) * 0.002
+        : 1.0;
     CGFloat fillScale = MAX(targetWidth / extent.size.width, targetHeight / extent.size.height);
-    CGFloat scale = fillScale * _zoom;
+    CGFloat scale = fillScale * _zoom * motionScale;
     image = [image imageByApplyingTransform:CGAffineTransformMakeScale(scale, scale)];
 
     CGRect scaledExtent = image.extent;
-    CGFloat translateX = ((targetWidth - scaledExtent.size.width) * 0.5) + (_offsetX * targetWidth * 0.5);
-    CGFloat translateY = ((targetHeight - scaledExtent.size.height) * 0.5) - (_offsetY * targetHeight * 0.5);
+    CGFloat translateX = ((targetWidth - scaledExtent.size.width) * 0.5)
+        + ((_offsetX + motionX) * targetWidth);
+    CGFloat translateY = ((targetHeight - scaledExtent.size.height) * 0.5)
+        - ((_offsetY + motionY) * targetHeight);
     image = [image imageByApplyingTransform:CGAffineTransformMakeTranslation(translateX - scaledExtent.origin.x,
                                                                             translateY - scaledExtent.origin.y)];
 
