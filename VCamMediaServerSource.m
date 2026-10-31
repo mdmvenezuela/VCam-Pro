@@ -379,7 +379,17 @@ static BOOL VCMDownloadMedia(NSString *destinationPath, NSInteger revision) {
 
     CIContext *_ciContext;
     CGColorSpaceRef _colorSpace;
+
+    // Reuse rendered camera buffers instead of allocating one for every frame.
+    CVPixelBufferPoolRef _replacementBufferPool;
+    size_t _poolWidth;
+    size_t _poolHeight;
+    OSType _poolPixelFormat;
+    NSUInteger _poolExhaustionCount;
 }
+- (CVPixelBufferRef)newReplacementPixelBufferWithWidth:(size_t)width
+                                                 height:(size_t)height
+                                            pixelFormat:(OSType)pixelFormat;
 - (void)refreshRemoteState;
 - (void)beginMediaLoadForRevision:(NSInteger)revision
                              type:(NSString *)type
@@ -421,6 +431,11 @@ static BOOL VCMDownloadMedia(NSString *destinationPath, NSInteger revision) {
 - (void)dealloc {
     if (_monitorTimer) dispatch_source_cancel(_monitorTimer);
     if (_colorSpace) CGColorSpaceRelease(_colorSpace);
+    if (_replacementBufferPool) {
+        CVPixelBufferPoolFlush(_replacementBufferPool, kCVPixelBufferPoolFlushExcessBuffers);
+        CFRelease(_replacementBufferPool);
+        _replacementBufferPool = NULL;
+    }
     if (_reader.status == AVAssetReaderStatusReading) [_reader cancelReading];
 }
 
@@ -719,6 +734,91 @@ static BOOL VCMDownloadMedia(NSString *destinationPath, NSInteger revision) {
     });
 }
 
+- (CVPixelBufferRef)newReplacementPixelBufferWithWidth:(size_t)width
+                                                 height:(size_t)height
+                                            pixelFormat:(OSType)pixelFormat {
+    if (width == 0 || height == 0) return NULL;
+
+    CVPixelBufferPoolRef pool = NULL;
+    [_lock lock];
+
+    BOOL poolNeedsRebuild = !_replacementBufferPool ||
+        _poolWidth != width ||
+        _poolHeight != height ||
+        _poolPixelFormat != pixelFormat;
+
+    if (poolNeedsRebuild) {
+        if (_replacementBufferPool) {
+            CVPixelBufferPoolFlush(_replacementBufferPool,
+                                   kCVPixelBufferPoolFlushExcessBuffers);
+            CFRelease(_replacementBufferPool);
+            _replacementBufferPool = NULL;
+        }
+
+        NSDictionary *poolAttributes = @{
+            (id)kCVPixelBufferPoolMinimumBufferCountKey: @2
+        };
+        NSDictionary *pixelBufferAttributes = @{
+            (id)kCVPixelBufferPixelFormatTypeKey: @(pixelFormat),
+            (id)kCVPixelBufferWidthKey: @(width),
+            (id)kCVPixelBufferHeightKey: @(height),
+            (id)kCVPixelBufferIOSurfacePropertiesKey: @{},
+            (id)kCVPixelBufferCGImageCompatibilityKey: @YES,
+            (id)kCVPixelBufferCGBitmapContextCompatibilityKey: @YES
+        };
+
+        CVReturn poolStatus = CVPixelBufferPoolCreate(
+            kCFAllocatorDefault,
+            (__bridge CFDictionaryRef)poolAttributes,
+            (__bridge CFDictionaryRef)pixelBufferAttributes,
+            &_replacementBufferPool);
+
+        if (poolStatus == kCVReturnSuccess && _replacementBufferPool) {
+            _poolWidth = width;
+            _poolHeight = height;
+            _poolPixelFormat = pixelFormat;
+            _poolExhaustionCount = 0;
+            NSLog(@"[VCam Pro/MediaServer] Pool de fotogramas creado: %zux%zu, formato %@.",
+                  width, height, @(pixelFormat));
+        } else {
+            _replacementBufferPool = NULL;
+            NSLog(@"[VCam Pro/MediaServer] No se pudo crear el pool de fotogramas (%d).",
+                  poolStatus);
+        }
+    }
+
+    if (_replacementBufferPool) pool = (CVPixelBufferPoolRef)CFRetain(_replacementBufferPool);
+    [_lock unlock];
+
+    if (!pool) return NULL;
+
+    // Hard cap: if downstream camera consumers retain too many frames, skip
+    // replacing this frame instead of allocating unbounded pixel buffers.
+    NSDictionary *auxiliaryAttributes = @{
+        (id)kCVPixelBufferPoolAllocationThresholdKey: @5
+    };
+    CVPixelBufferRef pixelBuffer = NULL;
+    CVReturn allocationStatus = CVPixelBufferPoolCreatePixelBufferWithAuxAttributes(
+        kCFAllocatorDefault,
+        pool,
+        (__bridge CFDictionaryRef)auxiliaryAttributes,
+        &pixelBuffer);
+    CFRelease(pool);
+
+    if (allocationStatus != kCVReturnSuccess || !pixelBuffer) {
+        [_lock lock];
+        NSUInteger exhaustion = ++_poolExhaustionCount;
+        [_lock unlock];
+        if (exhaustion == 1 || exhaustion % 300 == 0) {
+            NSLog(@"[VCam Pro/MediaServer] Pool de fotogramas al límite; se omite el fotograma (%d, intento %lu).",
+                  allocationStatus, (unsigned long)exhaustion);
+        }
+        return NULL;
+    }
+
+    return pixelBuffer;
+}
+
 - (CVPixelBufferRef)copyReplacementPixelBufferMatching:(CVPixelBufferRef)templateBuffer {
     if (!templateBuffer) return NULL;
 
@@ -812,23 +912,11 @@ static BOOL VCMDownloadMedia(NSString *destinationPath, NSInteger revision) {
     CGRect targetBounds = CGRectMake(0, 0, width, height);
     CIImage *cropped = [positioned imageByCroppingToRect:targetBounds];
 
-    NSDictionary *attributes = @{
-        (id)kCVPixelBufferIOSurfacePropertiesKey: @{},
-        (id)kCVPixelBufferCGImageCompatibilityKey: @YES,
-        (id)kCVPixelBufferCGBitmapContextCompatibilityKey: @YES
-    };
-    CVPixelBufferRef replacementBuffer = NULL;
-    CVReturn allocationStatus = CVPixelBufferCreate(kCFAllocatorDefault,
-                                                       width,
-                                                       height,
-                                                       pixelFormat,
-                                                       (__bridge CFDictionaryRef)attributes,
-                                                       &replacementBuffer);
-    if (allocationStatus != kCVReturnSuccess || !replacementBuffer) {
-        NSLog(@"[VCam Pro/MediaServer] No se pudo reservar un pixel buffer de reemplazo (%d).",
-              allocationStatus);
-        return NULL;
-    }
+    CVPixelBufferRef replacementBuffer =
+        [self newReplacementPixelBufferWithWidth:width
+                                          height:height
+                                     pixelFormat:pixelFormat];
+    if (!replacementBuffer) return NULL;
 
     CVBufferPropagateAttachments(templateBuffer, replacementBuffer);
     @try {
