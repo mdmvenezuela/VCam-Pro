@@ -133,37 +133,6 @@ static BOOL VCamSocketSendAll(int socketFD, const void *bytes, size_t length) {
     return YES;
 }
 
-static BOOL VCamReadHTTPStatus(int socketFD, NSInteger *statusCode) {
-    NSMutableData *headers = [NSMutableData data];
-    NSData *separator = [@"\r\n\r\n" dataUsingEncoding:NSUTF8StringEncoding];
-    uint8_t buffer[4096];
-    NSRange range = NSMakeRange(NSNotFound, 0);
-
-    while (range.location == NSNotFound && headers.length <= 16 * 1024) {
-        ssize_t amount = recv(socketFD, buffer, sizeof(buffer), 0);
-        if (amount < 0) {
-            if (errno == EINTR) continue;
-            return NO;
-        }
-        if (amount == 0) return NO;
-        [headers appendBytes:buffer length:(NSUInteger)amount];
-        range = [headers rangeOfData:separator options:0 range:NSMakeRange(0, headers.length)];
-    }
-
-    if (range.location == NSNotFound) return NO;
-    NSData *headerData = [headers subdataWithRange:NSMakeRange(0, range.location)];
-    NSString *headerText = [[NSString alloc] initWithData:headerData encoding:NSUTF8StringEncoding];
-    if (!headerText.length) return NO;
-
-    NSString *firstLine = [[headerText componentsSeparatedByString:@"\r\n"] firstObject];
-    NSArray<NSString *> *parts = [firstLine componentsSeparatedByString:@" "];
-    if (parts.count < 2) return NO;
-
-    NSInteger code = parts[1].integerValue;
-    if (statusCode) *statusCode = code;
-    return code >= 200 && code < 300;
-}
-
 static NSData *VCamHTTPGet(NSString *path) {
     int socketFD = VCamConnectToServer();
     if (socketFD < 0) return nil;
@@ -308,54 +277,6 @@ static BOOL VCamHTTPDownloadToFile(NSString *requestPath, NSString *destinationP
     close(socketFD);
     if (!headerParsed || expectedLength == ULLONG_MAX || written != expectedLength) success = NO;
     if (!success) unlink(destinationPath.fileSystemRepresentation);
-    return success;
-}
-
-static BOOL VCamHTTPUploadFile(NSString *filePath, NSString *mediaType, NSString *extension) {
-    struct stat fileInfo;
-    if (stat(filePath.fileSystemRepresentation, &fileInfo) != 0 || fileInfo.st_size <= 0) return NO;
-    if ((unsigned long long)fileInfo.st_size > 1024ULL * 1024ULL * 1024ULL) return NO;
-
-    NSString *safeExtension = extension.lowercaseString;
-    NSCharacterSet *allowed = [NSCharacterSet characterSetWithCharactersInString:@"abcdefghijklmnopqrstuvwxyz0123456789"];
-    safeExtension = [[safeExtension componentsSeparatedByCharactersInSet:allowed.invertedSet] componentsJoinedByString:@""];
-    if (safeExtension.length == 0 || safeExtension.length > 8) safeExtension = [mediaType isEqualToString:@"image"] ? @"jpg" : @"mp4";
-
-    int fileFD = open(filePath.fileSystemRepresentation, O_RDONLY);
-    if (fileFD < 0) return NO;
-
-    int socketFD = VCamConnectToServer();
-    if (socketFD < 0) {
-        close(fileFD);
-        return NO;
-    }
-
-    NSString *path = [NSString stringWithFormat:@"/upload?type=%@&ext=%@", mediaType, safeExtension];
-    NSString *header = [NSString stringWithFormat:@"POST %@ HTTP/1.1\r\nHost: 127.0.0.1\r\nContent-Type: application/octet-stream\r\nContent-Length: %lld\r\nConnection: close\r\n\r\n", path, (long long)fileInfo.st_size];
-    BOOL success = VCamSocketSendAll(socketFD, header.UTF8String, header.length);
-
-    uint8_t buffer[64 * 1024];
-    unsigned long long remaining = (unsigned long long)fileInfo.st_size;
-    while (success && remaining > 0) {
-        ssize_t amount = read(fileFD, buffer, (size_t)MIN((unsigned long long)sizeof(buffer), remaining));
-        if (amount < 0) {
-            if (errno == EINTR) continue;
-            success = NO;
-            break;
-        }
-        if (amount == 0) {
-            success = NO;
-            break;
-        }
-        success = VCamSocketSendAll(socketFD, buffer, (size_t)amount);
-        remaining -= (unsigned long long)amount;
-    }
-
-    close(fileFD);
-    NSInteger status = 0;
-    if (success) success = VCamReadHTTPStatus(socketFD, &status);
-    close(socketFD);
-    if (!success) NSLog(@"[VCam Pro] Subida IPC fallida (HTTP %ld).", (long)status);
     return success;
 }
 
