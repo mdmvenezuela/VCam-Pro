@@ -498,8 +498,12 @@ static void VCMSharedStateDidChange(CFNotificationCenterRef center,
 
 - (BOOL)isReplacementEnabled {
     [_lock lock];
-    BOOL enabled = _enabled && !_loading &&
-        (_stillImage != nil || [_mediaType isEqualToString:@"video"]);
+    // While a new revision is decoding, keep serving the last successfully
+    // loaded source. The replacement renderer already snapshots that source
+    // under the same lock, so a selection swap never falls back to the real
+    // camera merely because the next image/video is still loading.
+    BOOL hasReadySource = (_stillImage != nil || [_mediaType isEqualToString:@"video"]);
+    BOOL enabled = _enabled && hasReadySource;
     [_lock unlock];
     return enabled;
 }
