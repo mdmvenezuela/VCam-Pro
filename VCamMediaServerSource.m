@@ -20,6 +20,43 @@ static const uint16_t kVCamMediaServerPort = 47831;
 static NSString * const kVCamSystemReplacementAttachment =
     @"com.vcam.pro.systemreplacement.v1";
 
+static BOOL VCMIsOrientationMetadataKey(CFStringRef key) {
+    if (!key || CFGetTypeID(key) != CFStringGetTypeID()) return NO;
+    return CFStringFind(key, CFSTR("orientation"), kCFCompareCaseInsensitive).location != kCFNotFound ||
+           CFStringFind(key, CFSTR("rotation"), kCFCompareCaseInsensitive).location != kCFNotFound ||
+           CFStringFind(key, CFSTR("transform"), kCFCompareCaseInsensitive).location != kCFNotFound;
+}
+
+static void VCMCollectOrientationAttachmentKey(const void *key,
+                                                const void *value,
+                                                void *context) {
+    if (key && context && VCMIsOrientationMetadataKey((CFStringRef)key)) {
+        CFArrayAppendValue((CFMutableArrayRef)context, key);
+    }
+}
+
+static void VCMRemoveOrientationAttachmentsForMode(CVPixelBufferRef pixelBuffer,
+                                                     CVAttachmentMode mode) {
+    CFDictionaryRef attachments = CVBufferGetAttachments(pixelBuffer, mode);
+    if (!attachments || CFDictionaryGetCount(attachments) == 0) return;
+
+    CFMutableArrayRef keys = CFArrayCreateMutable(kCFAllocatorDefault, 0,
+                                                   &kCFTypeArrayCallBacks);
+    if (!keys) return;
+    CFDictionaryApplyFunction(attachments, VCMCollectOrientationAttachmentKey, keys);
+    for (CFIndex index = 0; index < CFArrayGetCount(keys); index++) {
+        CVBufferRemoveAttachment(pixelBuffer,
+            (CFStringRef)CFArrayGetValueAtIndex(keys, index));
+    }
+    CFRelease(keys);
+}
+
+static void VCMRemoveOrientationAttachments(CVPixelBufferRef pixelBuffer) {
+    if (!pixelBuffer) return;
+    VCMRemoveOrientationAttachmentsForMode(pixelBuffer, kCVAttachmentMode_ShouldPropagate);
+    VCMRemoveOrientationAttachmentsForMode(pixelBuffer, kCVAttachmentMode_ShouldNotPropagate);
+}
+
 static BOOL VCMWriteAll(int fd, const void *bytes, size_t length) {
     const uint8_t *cursor = (const uint8_t *)bytes;
     size_t offset = 0;
@@ -1008,6 +1045,8 @@ static void VCMSharedStateDidChange(CFNotificationCenterRef center,
     if (!replacementBuffer) return NULL;
 
     CVBufferPropagateAttachments(templateBuffer, replacementBuffer);
+    // Pixels are already physically oriented; discard inherited orientation hints.
+    VCMRemoveOrientationAttachments(replacementBuffer);
     @try {
         [_ciContext render:cropped
            toCVPixelBuffer:replacementBuffer
