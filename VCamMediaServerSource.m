@@ -15,10 +15,13 @@
 #import <string.h>
 #import <stdlib.h>
 #import <limits.h>
+#import <stdatomic.h>
 
 static const uint16_t kVCamMediaServerPort = 47831;
 static NSString * const kVCamSystemReplacementAttachment =
     @"com.vcam.pro.systemreplacement.v1";
+
+static _Atomic(uint32_t) g_vcmRenderDiagnosticCount = 0;
 
 static BOOL VCMWriteAll(int fd, const void *bytes, size_t length) {
     const uint8_t *cursor = (const uint8_t *)bytes;
@@ -952,6 +955,23 @@ static void VCMSharedStateDidChange(CFNotificationCenterRef center,
         }
     }
     if (!sourceImage) return NULL;
+
+    uint32_t renderDiagnostic = atomic_fetch_add_explicit(
+        &g_vcmRenderDiagnosticCount, 1, memory_order_relaxed);
+    if (renderDiagnostic < 24) {
+        NSLog(@"[VCam Pro/OrientationDiag] render #%u media=%@ source=%.1fx%.1f target=%zux%zu rotation=%ld mirror=%d preferred=[%.3f %.3f %.3f %.3f %.3f %.3f]",
+              renderDiagnostic + 1,
+              videoMode ? @"video" : @"image",
+              sourceImage.extent.size.width,
+              sourceImage.extent.size.height,
+              CVPixelBufferGetWidth(templateBuffer),
+              CVPixelBufferGetHeight(templateBuffer),
+              (long)rotationDegrees,
+              mirrorEnabled,
+              preferredTransform.a, preferredTransform.b,
+              preferredTransform.c, preferredTransform.d,
+              preferredTransform.tx, preferredTransform.ty);
+    }
 
     NSInteger normalizedRotation = ((rotationDegrees % 360) + 360) % 360;
     CGImagePropertyOrientation rotationOrientation = kCGImagePropertyOrientationUp;
