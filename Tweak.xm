@@ -8,81 +8,148 @@
 // MARK: - 全局状态
 // ============================================================================
 
-static BOOL g_vcamEnabled = NO;
-static UIWindow *g_overlayWindow = nil;
-static UIButton *g_floatButton = nil;
-
-// ============================================================================
-// MARK: - 悬浮按钮 UI
-// ============================================================================
-
-@interface VCamFloatButton : UIButton
-@property (nonatomic, assign) CGPoint initialCenter;
+@interface VCamPassthroughWindow : UIWindow
+@property (nonatomic, weak) UIView *interactiveView;
 @end
 
-@implementation VCamFloatButton
+@implementation VCamPassthroughWindow
+
+// La ventana solamente recibe toques dentro del botón.
+- (BOOL)pointInside:(CGPoint)point withEvent:(UIEvent *)event {
+    UIView *target = self.interactiveView;
+
+    if (!target || self.hidden || self.alpha < 0.01 ||
+        target.hidden || target.alpha < 0.01) {
+        return NO;
+    }
+
+    CGPoint localPoint = [target convertPoint:point fromView:self];
+    return CGRectContainsPoint(target.bounds, localPoint);
+}
+
 @end
 
-static void setupFloatButton(void);
 static void handlePanGesture(UIPanGestureRecognizer *gesture);
 static void handleTapGesture(UITapGestureRecognizer *gesture);
 
-static void setupFloatButton() {
-    if (g_floatButton) return;
-    
-    CGFloat btnSize = 50;
+@interface VCamFloatButton : UIButton
+- (void)handlePan:(UIPanGestureRecognizer *)gesture;
+- (void)handleTap:(UITapGestureRecognizer *)gesture;
+@end
+
+@implementation VCamFloatButton
+
+- (void)handlePan:(UIPanGestureRecognizer *)gesture {
+    handlePanGesture(gesture);
+}
+
+- (void)handleTap:(UITapGestureRecognizer *)gesture {
+    handleTapGesture(gesture);
+}
+
+@end
+
+static BOOL g_vcamEnabled = NO;
+static VCamPassthroughWindow *g_overlayWindow = nil;
+static VCamFloatButton *g_floatButton = nil;
+
+static void setupFloatButton(void) {
+
+    if (g_floatButton && g_overlayWindow) return;
+
     CGRect screen = [UIScreen mainScreen].bounds;
-    
+    CGFloat btnSize = 50;
+
     g_floatButton = [VCamFloatButton buttonWithType:UIButtonTypeSystem];
-    g_floatButton.frame = CGRectMake(screen.size.width - btnSize - 15, 100, btnSize, btnSize);
+
+    g_floatButton.frame = CGRectMake(
+        screen.size.width - btnSize - 15,
+        120,
+        btnSize,
+        btnSize
+    );
+
     g_floatButton.layer.cornerRadius = btnSize / 2.0;
-    g_floatButton.layer.shadowColor = [UIColor blackColor].CGColor;
+    g_floatButton.layer.shadowColor = UIColor.blackColor.CGColor;
     g_floatButton.layer.shadowOffset = CGSizeMake(0, 2);
     g_floatButton.layer.shadowOpacity = 0.3;
     g_floatButton.layer.shadowRadius = 4;
-    g_floatButton.backgroundColor = g_vcamEnabled 
-        ? [UIColor colorWithRed:0.2 green:0.8 blue:0.4 alpha:0.9]
-        : [UIColor colorWithRed:0.4 green:0.4 blue:0.4 alpha:0.9];
-    
+
+    g_floatButton.backgroundColor =
+        [UIColor colorWithRed:0.4 green:0.4 blue:0.4 alpha:0.95];
+
     [g_floatButton setTitle:@"📷" forState:UIControlStateNormal];
     g_floatButton.titleLabel.font = [UIFont systemFontOfSize:24];
-    
-    UIPanGestureRecognizer *pan = [[UIPanGestureRecognizer alloc] 
-        initWithTarget:g_floatButton action:@selector(handlePan:)];
+
+    UIPanGestureRecognizer *pan =
+        [[UIPanGestureRecognizer alloc]
+            initWithTarget:g_floatButton
+            action:@selector(handlePan:)];
+
+    pan.maximumNumberOfTouches = 1;
+
+    UITapGestureRecognizer *tap =
+        [[UITapGestureRecognizer alloc]
+            initWithTarget:g_floatButton
+            action:@selector(handleTap:)];
+
+    [tap requireGestureRecognizerToFail:pan];
+
     [g_floatButton addGestureRecognizer:pan];
-    
-    UITapGestureRecognizer *tap = [[UITapGestureRecognizer alloc] 
-        initWithTarget:g_floatButton action:@selector(handleTap:)];
     [g_floatButton addGestureRecognizer:tap];
-    
-    g_overlayWindow = [[UIWindow alloc] initWithFrame:screen];
-    g_overlayWindow.windowLevel = UIWindowLevelAlert + 100;
-    g_overlayWindow.hidden = NO;
-    g_overlayWindow.backgroundColor = [UIColor clearColor];
-    
+
+    // Ventana transparente con passthrough.
+    g_overlayWindow =
+        [[VCamPassthroughWindow alloc] initWithFrame:screen];
+
+    g_overlayWindow.windowLevel = UIWindowLevelAlert - 1;
+    g_overlayWindow.backgroundColor = UIColor.clearColor;
+    g_overlayWindow.opaque = NO;
+    g_overlayWindow.interactiveView = g_floatButton;
+
     UIViewController *rootVC = [[UIViewController alloc] init];
-    rootVC.view.backgroundColor = [UIColor clearColor];
+
+    rootVC.view.frame = screen;
+    rootVC.view.backgroundColor = UIColor.clearColor;
+
     [rootVC.view addSubview:g_floatButton];
+
     g_overlayWindow.rootViewController = rootVC;
-    
-    // Register selectors on the button class
-    class_addMethod([g_floatButton class], @selector(handlePan:), 
-                    (IMP)handlePanGesture, "v@:@");
-    class_addMethod([g_floatButton class], @selector(handleTap:), 
-                    (IMP)handleTapGesture, "v@:@");
+    g_overlayWindow.hidden = NO;
 }
 
 static void handlePanGesture(UIPanGestureRecognizer *gesture) {
-    UIView *btn = gesture.view;
-    CGPoint translation = [gesture translationInView:btn.superview];
-    btn.center = CGPointMake(btn.center.x + translation.x, btn.center.y + translation.y);
-    [gesture setTranslation:CGPointZero inView:btn.superview];
-    
+
+    UIView *button = gesture.view;
+    UIView *container = button.superview;
+
+    CGPoint translation = [gesture translationInView:container];
+
+    CGPoint center = button.center;
+    center.x += translation.x;
+    center.y += translation.y;
+
+    CGFloat halfWidth = CGRectGetWidth(button.bounds) / 2.0;
+    CGFloat halfHeight = CGRectGetHeight(button.bounds) / 2.0;
+
+    center.x = MAX(halfWidth + 5,
+                   MIN(center.x, CGRectGetWidth(container.bounds) - halfWidth - 5));
+
+    center.y = MAX(halfHeight + 5,
+                   MIN(center.y, CGRectGetHeight(container.bounds) - halfHeight - 5));
+
+    button.center = center;
+
+    [gesture setTranslation:CGPointZero inView:container];
+
     if (gesture.state == UIGestureRecognizerStateEnded) {
-        CGRect screen = [UIScreen mainScreen].bounds;
-        CGFloat x = btn.center.x < screen.size.width / 2 ? 35 : screen.size.width - 35;
+
+        CGFloat x = center.x < CGRectGetMidX(container.bounds)
+            ? halfWidth + 5
+            : CGRectGetWidth(container.bounds) - halfWidth - 5;
+
         [UIView animateWithDuration:0.2 animations:^{
-            btn.center = CGPointMake(x, btn.center.y);
+            button.center = CGPointMake(x, center.y);
         }];
     }
 }
