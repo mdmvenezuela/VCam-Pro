@@ -2,7 +2,6 @@
 #import <AVFoundation/AVFoundation.h>
 #import <CoreMedia/CoreMedia.h>
 #import <CoreVideo/CoreVideo.h>
-#import <MobileCoreServices/MobileCoreServices.h>
 #import <objc/runtime.h>
 #import <arpa/inet.h>
 #import <errno.h>
@@ -872,7 +871,26 @@ static BOOL VCamIsJPEGData(NSData *data) {
     UIImage *image = info[UIImagePickerControllerOriginalImage];
     if (!image) {
         NSURL *imageURL = info[UIImagePickerControllerImageURL];
-        if (imageURL) image = [UIImage imageWithContentsOfURL:imageURL];
+        if (imageURL) {
+            BOOL didStartImageAccess = NO;
+            if ([imageURL respondsToSelector:@selector(startAccessingSecurityScopedResource)]) {
+                didStartImageAccess = [imageURL startAccessingSecurityScopedResource];
+            }
+
+            NSError *imageReadError = nil;
+            NSData *imageData = [NSData dataWithContentsOfURL:imageURL
+                                                       options:NSDataReadingMappedIfSafe
+                                                         error:&imageReadError];
+            if (imageData) {
+                image = [UIImage imageWithData:imageData];
+            } else {
+                NSLog(@"[VCam Pro] No se pudo leer la imagen seleccionada: %@", imageReadError);
+            }
+
+            if (didStartImageAccess) {
+                [imageURL stopAccessingSecurityScopedResource];
+            }
+        }
     }
 
     NSData *jpeg = image ? UIImageJPEGRepresentation(image, 0.94) : nil;
@@ -924,7 +942,7 @@ static void VCamShowPicker(void) {
     if (!g_overlayController || g_overlayController.presentedViewController) return;
     UIImagePickerController *picker = [[UIImagePickerController alloc] init];
     picker.sourceType = UIImagePickerControllerSourceTypePhotoLibrary;
-    picker.mediaTypes = @[(NSString *)kUTTypeImage, (NSString *)kUTTypeMovie];
+    picker.mediaTypes = @[@"public.image", @"public.movie"];
     picker.videoQuality = UIImagePickerControllerQualityTypeHigh;
     picker.delegate = g_pickerDelegate;
     [g_overlayController presentViewController:picker animated:YES completion:nil];
