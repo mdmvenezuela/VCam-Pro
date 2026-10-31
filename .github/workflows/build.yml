@@ -1,80 +1,145 @@
-name: Build VCam
+name: Build VCam RootHide
 
 on:
   push:
-    branches: [ main ]
-    tags: [ 'v*' ]
+    branches:
+      - main
+    tags:
+      - 'v*'
+
   workflow_dispatch:
+
+permissions:
+  contents: read
 
 jobs:
   build:
-    name: Build iOS Tweak
+    name: Build iOS Tweak for RootHide
     runs-on: macos-14
-    
+
     steps:
-    - name: Checkout
-      uses: actions/checkout@v4
+      - name: Checkout repository
+        uses: actions/checkout@v4
 
-    - name: Install dependencies
-      run: |
-        brew install ldid xz
-      timeout-minutes: 10
+      - name: Install dependencies
+        run: |
+          set -euo pipefail
+          brew install ldid xz dpkg
 
-    - name: Install Theos
-      run: |
-        export THEOS=~/theos
-        git clone --recursive https://github.com/theos/theos.git ~/theos
-        echo "THEOS=$HOME/theos" >> $GITHUB_ENV
-        echo "PATH=$HOME/theos/bin:$PATH" >> $GITHUB_ENV
-      timeout-minutes: 10
+      - name: Install RootHide Theos
+        run: |
+          set -euo pipefail
 
-    - name: Install iOS SDK
-      run: |
-        curl -fsSL https://github.com/theos/sdks/releases/download/master-146e41f/iPhoneOS16.5.sdk.tar.xz -o /tmp/sdk.tar.xz
-        mkdir -p $HOME/theos/sdks
-        tar -xf /tmp/sdk.tar.xz -C $HOME/theos/sdks
-        echo "Installed SDKs:"
-        ls $HOME/theos/sdks/
-      timeout-minutes: 10
+          git clone --recursive \
+            https://github.com/roothide/theos.git \
+            "$HOME/theos"
 
-    - name: Build Tweak
-      run: |
-        export THEOS=$HOME/theos
-        export PATH=$HOME/theos/bin:$PATH
-        make clean
-        make package FINALPACKAGE=1 2>&1
-        echo "Build complete. Packages:"
-        ls -lh packages/ 2>/dev/null || echo "No packages dir"
-      timeout-minutes: 15
+          echo "THEOS=$HOME/theos" >> "$GITHUB_ENV"
+          echo "$HOME/theos/bin" >> "$GITHUB_PATH"
 
-    - name: Extract dylib
-      run: |
-        mkdir -p output
-        DEB=$(ls packages/*.deb 2>/dev/null | head -1)
-        if [ -z "$DEB" ]; then
-          echo "No deb found!"
-          exit 1
-        fi
-        echo "Found: $DEB"
-        cp "$DEB" output/
-        cd output
-        ar x ../packages/*.deb 2>/dev/null || dpkg-deb -x "$DEB" .
-        # Try to find dylib in extracted contents
-        find . -name "*.dylib" -exec cp {} ./VCam.dylib \; 2>/dev/null
-        # If ar worked, try tar
-        tar -xf data.tar* 2>/dev/null && find . -name "*.dylib" -exec cp {} ./VCam.dylib \; 2>/dev/null
-        ls -lh
+      - name: Install iOS SDK
+        run: |
+          set -euo pipefail
 
-    - name: Upload dylib
-      uses: actions/upload-artifact@v4
-      with:
-        name: VCam-dylib
-        path: output/VCam.dylib
-        retention-days: 30
+          SDK_URL="https://github.com/theos/sdks/releases/download/master-146e41f/iPhoneOS16.5.sdk.tar.xz"
 
-    - name: Upload deb
-      uses: actions/upload-artifact@v4
-      with:
-        name: VCam-deb
-        path: output/*.deb
-        retention-days: 30
+          curl -fL "$SDK_URL" -o /tmp/sdk.tar.xz
+
+          mkdir -p "$HOME/theos/sdks"
+
+          tar -xf /tmp/sdk.tar.xz -C "$HOME/theos/sdks"
+
+          echo "Installed SDKs:"
+          ls -lh "$HOME/theos/sdks/"
+
+          test -d "$HOME/theos/sdks/iPhoneOS16.5.sdk"
+
+      - name: Build and validate VCam
+        run: |
+          set -euo pipefail
+
+          echo "Cleaning previous build..."
+          make clean
+
+          echo "Building RootHide package..."
+          make package FINALPACKAGE=1 THEOS_PACKAGE_SCHEME=roothide
+
+          echo "Searching generated DEB..."
+          DEB="$(find packages -maxdepth 1 -type f -name '*.deb' -print -quit)"
+
+          if [ -z "$DEB" ]; then
+            echo "ERROR: No DEB package was generated."
+            exit 1
+          fi
+
+          echo "Generated package: $DEB"
+
+          echo "Checking Debian architecture..."
+          PACKAGE_ARCH="$(dpkg-deb -f "$DEB" Architecture)"
+
+          echo "Package architecture: $PACKAGE_ARCH"
+
+          if [ "$PACKAGE_ARCH" != "iphoneos-arm64e" ]; then
+            echo "ERROR: Incorrect RootHide package architecture."
+            exit 1
+          fi
+
+          mkdir -p output/unpacked
+
+          cp "$DEB" output/
+
+          echo "Extracting package..."
+          dpkg-deb -x "$DEB" output/unpacked
+
+          DYLIB="$(find output/unpacked -type f -name 'VCam.dylib' -print -quit)"
+
+          if [ -z "$DYLIB" ]; then
+            echo "ERROR: VCam.dylib was not found inside the DEB."
+            exit 1
+          fi
+
+          echo "Found tweak: $DYLIB"
+
+          echo "Checking compiled binary architecture..."
+          BINARY_ARCHS="$(xcrun lipo -archs "$DYLIB")"
+
+          echo "Binary architectures: $BINARY_ARCHS"
+
+          case " $BINARY_ARCHS " in
+            *" arm64 "*) ;;
+            *)
+              echo "ERROR: VCam.dylib does not contain arm64."
+              exit 1
+              ;;
+          esac
+
+          cp "$DYLIB" output/VCam.dylib
+
+          rm -rf output/unpacked
+
+          {
+            echo "## VCam RootHide build"
+            echo ""
+            echo "- Package: $DEB"
+            echo "- Debian architecture: $PACKAGE_ARCH"
+            echo "- Binary architecture: $BINARY_ARCHS"
+            echo "- Package validation: passed"
+          } >> "$GITHUB_STEP_SUMMARY"
+
+          echo "Build and validation completed successfully."
+
+      - name: Upload DEB package
+        uses: actions/upload-artifact@v4
+        with:
+          name: VCam-RootHide-DEB
+          path: output/*.deb
+          if-no-files-found: error
+          retention-days: 30
+
+      - name: Upload compiled dylib
+        uses: actions/upload-artifact@v4
+        with:
+          name: VCam-RootHide-Dylib
+          path: output/VCam.dylib
+          if-no-files-found: error
+          retention-days: 30
