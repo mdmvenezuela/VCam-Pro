@@ -1,6 +1,7 @@
 #import "MediaManager.h"
 
 #import <CoreImage/CoreImage.h>
+#import <ImageIO/ImageIO.h>
 #import <QuartzCore/QuartzCore.h>
 #import <math.h>
 
@@ -29,6 +30,7 @@
     CGFloat _zoom;
     CGFloat _offsetX;
     CGFloat _offsetY;
+    NSInteger _rotationDegrees;
 }
 
 - (BOOL)createReaderLocked:(NSError **)error;
@@ -241,6 +243,14 @@
     [_lock unlock];
 }
 
+- (void)setRotationDegrees:(NSInteger)rotationDegrees {
+    NSInteger normalized = ((rotationDegrees % 360) + 360) % 360;
+    normalized = ((normalized + 45) / 90 * 90) % 360;
+    [_lock lock];
+    _rotationDegrees = normalized;
+    [_lock unlock];
+}
+
 - (void)start {
     [_lock lock];
     if (_ready) {
@@ -347,6 +357,24 @@
     if (extent.origin.x != 0 || extent.origin.y != 0) {
         image = [image imageByApplyingTransform:CGAffineTransformMakeTranslation(-extent.origin.x, -extent.origin.y)];
         extent = image.extent;
+    }
+
+    NSInteger rotation = ((_rotationDegrees % 360) + 360) % 360;
+    CGImagePropertyOrientation orientation = kCGImagePropertyOrientationUp;
+    switch (rotation) {
+        case 90: orientation = kCGImagePropertyOrientationRight; break;
+        case 180: orientation = kCGImagePropertyOrientationDown; break;
+        case 270: orientation = kCGImagePropertyOrientationLeft; break;
+        default: break;
+    }
+    if (orientation != kCGImagePropertyOrientationUp) {
+        image = [image imageByApplyingOrientation:orientation];
+        extent = image.extent;
+        if (!CGRectIsEmpty(extent) && (extent.origin.x != 0.0 || extent.origin.y != 0.0)) {
+            image = [image imageByApplyingTransform:
+                CGAffineTransformMakeTranslation(-extent.origin.x, -extent.origin.y)];
+            extent = image.extent;
+        }
     }
 
     CGFloat fillScale = MAX(targetWidth / extent.size.width, targetHeight / extent.size.height);
