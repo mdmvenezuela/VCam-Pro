@@ -582,12 +582,9 @@ static void VCamPreviewPumpTick(void) {
     if (g_previewOverlayLayers.allObjects.count == 0) return;
 
     MediaManager *manager = [MediaManager sharedManager];
-    if (manager.mode == VCamMediaModePhoto) {
-        NSData *jpeg = [manager nextPhotoData];
-        if (jpeg.length) VCamUpdatePreviewOverlaysWithJPEG(jpeg);
-        return;
-    }
 
+    // Still images are pushed once when the media revision is loaded or the
+    // preview layer is attached. Re-encoding JPEG at 30 Hz would waste CPU.
     if (manager.mode != VCamMediaModeVideo) return;
 
     CFTimeInterval now = CACurrentMediaTime();
