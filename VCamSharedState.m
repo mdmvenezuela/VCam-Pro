@@ -319,7 +319,6 @@ static BOOL VCamSendAll(int socketFD, const void *bytes, size_t length) {
     _mediaType = @"image";
     _mediaExtension = @"jpg";
     _mediaRevision += 1;
-    _enabled = YES;
     _stateRevision += 1;
     [self persistLocked];
     [_stateLock unlock];
@@ -368,7 +367,6 @@ static BOOL VCamSendAll(int socketFD, const void *bytes, size_t length) {
     _mediaType = @"video";
     _mediaExtension = ext;
     _mediaRevision += 1;
-    _enabled = YES;
     _stateRevision += 1;
     [self persistLocked];
     [_stateLock unlock];
@@ -897,7 +895,6 @@ static BOOL VCamSendAll(int socketFD, const void *bytes, size_t length) {
         _mediaType = mediaType;
         _mediaExtension = extension;
         _mediaRevision += 1;
-        _enabled = YES;
         _stateRevision += 1;
         [self persistLocked];
         [_stateLock unlock];
