@@ -8,6 +8,7 @@ NS_ASSUME_NONNULL_BEGIN
 @property (nonatomic, readonly, getter=isEnabled) BOOL enabled;
 @property (nonatomic, copy, readonly, nullable) NSString *mediaType;
 @property (nonatomic, copy, readonly, nullable) NSString *mediaExtension;
+@property (nonatomic, copy, readonly, nullable) NSString *mediaPath;
 @property (nonatomic, assign, readonly) NSInteger mediaRevision;
 @property (nonatomic, assign, readonly) NSInteger stateRevision;
 @property (nonatomic, assign, readonly) CGFloat zoom;
