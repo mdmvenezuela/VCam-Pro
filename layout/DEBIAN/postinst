@@ -1,10 +1,18 @@
 #!/bin/bash
 
-# 设置权限
+set -u
+
+# Permisos de las bibliotecas y filtros de RootHide.
 chmod 755 /Library/MobileSubstrate/DynamicLibraries/VCam.dylib
 chmod 644 /Library/MobileSubstrate/DynamicLibraries/VCam.plist
+chmod 755 /Library/MobileSubstrate/DynamicLibraries/VCamMediaServer.dylib
+chmod 644 /Library/MobileSubstrate/DynamicLibraries/VCamMediaServer.plist
 
-# 重启 SpringBoard 加载插件
-killall -9 SpringBoard
+# Reiniciar el servicio de cámara para que RootHide cargue el motor nuevo.
+# iOS vuelve a iniciar mediaserverd automáticamente cuando se necesita.
+killall -9 mediaserverd >/dev/null 2>&1 || true
+
+# Recargar la interfaz de VCam en SpringBoard.
+killall -9 SpringBoard >/dev/null 2>&1 || true
 
 exit 0
