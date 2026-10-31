@@ -43,6 +43,10 @@ static UIWindow *g_overlayWindow = nil;
 static UIViewController *g_overlayController = nil;
 static UIButton *g_floatButton = nil;
 @class VCamAdjustmentPanel;
+@interface VCamAdjustmentPanel (RefreshAPI)
+- (void)reloadPreview;
+- (void)refreshFraming;
+@end
 static VCamAdjustmentPanel *g_adjustmentPanel = nil;
 static NSInteger g_adjustmentPreviewRevision = -1;
 static id g_pickerDelegate = nil;
@@ -440,6 +444,13 @@ static void VCamRefreshFromServer(void) {
         dispatch_async(dispatch_get_main_queue(), ^{
             VCamUpdateButton();
             VCamClampButton();
+            if (g_isSpringBoardProcess && g_adjustmentPanel) {
+                if (g_adjustmentPreviewRevision != mediaRevision) {
+                    g_adjustmentPreviewRevision = mediaRevision;
+                    [g_adjustmentPanel reloadPreview];
+                }
+                [g_adjustmentPanel refreshFraming];
+            }
         });
 
         if (g_isSpringBoardProcess) return;
