@@ -51,6 +51,11 @@ static BOOL VCamSendAll(int socketFD, const void *bytes, size_t length) {
     CGFloat _offsetY;
     CGFloat _buttonX;
     CGFloat _buttonY;
+    NSString *_engineStatus;
+    NSString *_engineDetail;
+    NSUInteger _engineHooks;
+    NSUInteger _engineFrames;
+    NSTimeInterval _engineLastSeen;
 }
 
 - (NSString *)privateDirectory;
@@ -86,6 +91,11 @@ static BOOL VCamSendAll(int socketFD, const void *bytes, size_t length) {
         _buttonY = 0.24;
         _mediaRevision = 0;
         _stateRevision = 0;
+        _engineStatus = @"not_reported";
+        _engineDetail = @"Esperando confirmación de mediaserverd.";
+        _engineHooks = 0;
+        _engineFrames = 0;
+        _engineLastSeen = 0;
 
         NSDictionary *saved = [NSDictionary dictionaryWithContentsOfFile:[self stateFilePath]];
         if ([saved isKindOfClass:[NSDictionary class]]) {
@@ -211,7 +221,12 @@ static BOOL VCamSendAll(int socketFD, const void *bytes, size_t length) {
         @"offsetX": @(_offsetX),
         @"offsetY": @(_offsetY),
         @"buttonX": @(_buttonX),
-        @"buttonY": @(_buttonY)
+        @"buttonY": @(_buttonY),
+        @"engineStatus": _engineStatus ?: @"not_reported",
+        @"engineDetail": _engineDetail ?: @"",
+        @"engineHooks": @(_engineHooks),
+        @"engineFrames": @(_engineFrames),
+        @"engineLastSeen": @(_engineLastSeen)
     };
 }
 
@@ -600,6 +615,66 @@ static BOOL VCamSendAll(int socketFD, const void *bytes, size_t length) {
             if (!VCamSendAll(clientFD, fileBuffer, (size_t)amount)) break;
         }
         close(fileFD);
+        return;
+    }
+
+    if (isPOST && [requestPath isEqualToString:@"/engine-status"]) {
+        const unsigned long long maximumStatusSize = 8 * 1024;
+        if (contentLength == 0 || contentLength > maximumStatusSize ||
+            initialBodyLength > contentLength) return;
+
+        NSMutableData *body = [NSMutableData dataWithBytes:initialBody
+                                                    length:initialBodyLength];
+        while (body.length < contentLength) {
+            size_t remaining = (size_t)(contentLength - body.length);
+            ssize_t amount = recv(clientFD, receiveBuffer,
+                                  MIN(sizeof(receiveBuffer), remaining), 0);
+            if (amount < 0) {
+                if (errno == EINTR) continue;
+                return;
+            }
+            if (amount == 0) return;
+            [body appendBytes:receiveBuffer length:(NSUInteger)amount];
+        }
+
+        NSError *jsonError = nil;
+        id object = [NSJSONSerialization JSONObjectWithData:body options:0 error:&jsonError];
+        if (![object isKindOfClass:[NSDictionary class]]) {
+            NSData *responseBody = [@"Invalid engine status JSON" dataUsingEncoding:NSUTF8StringEncoding];
+            NSString *responseHeader = [NSString stringWithFormat:
+                @"HTTP/1.1 400 Bad Request\r\nContent-Length: %lu\r\nConnection: close\r\n\r\n",
+                (unsigned long)responseBody.length];
+            VCamSendAll(clientFD, responseHeader.UTF8String, responseHeader.length);
+            VCamSendAll(clientFD, responseBody.bytes, responseBody.length);
+            return;
+        }
+
+        NSDictionary *report = (NSDictionary *)object;
+        NSString *status = [report[@"status"] isKindOfClass:[NSString class]]
+            ? report[@"status"] : @"unknown";
+        NSString *detail = [report[@"detail"] isKindOfClass:[NSString class]]
+            ? report[@"detail"] : @"";
+        if (status.length > 64) status = [status substringToIndex:64];
+        if (detail.length > 512) detail = [detail substringToIndex:512];
+
+        [_stateLock lock];
+        _engineStatus = [status copy];
+        _engineDetail = [detail copy];
+        if ([report[@"hooks"] isKindOfClass:[NSNumber class]]) {
+            _engineHooks = MAX(0, [report[@"hooks"] unsignedIntegerValue]);
+        }
+        if ([report[@"frames"] isKindOfClass:[NSNumber class]]) {
+            _engineFrames = MAX(0, [report[@"frames"] unsignedIntegerValue]);
+        }
+        _engineLastSeen = [NSDate date].timeIntervalSince1970;
+        [_stateLock unlock];
+
+        NSData *responseBody = [@"{\\"ok\\":true}" dataUsingEncoding:NSUTF8StringEncoding];
+        NSString *responseHeader = [NSString stringWithFormat:
+            @"HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: %lu\r\nConnection: close\r\n\r\n",
+            (unsigned long)responseBody.length];
+        VCamSendAll(clientFD, responseHeader.UTF8String, responseHeader.length);
+        VCamSendAll(clientFD, responseBody.bytes, responseBody.length);
         return;
     }
 
