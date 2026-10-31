@@ -198,12 +198,12 @@ static NSData *VCMFetchSmallResponse(NSString *path) {
     return body.length == expectedLength ? body : nil;
 }
 
-static BOOL VCMDownloadMedia(NSString *destinationPath) {
+static BOOL VCMDownloadMedia(NSString *destinationPath, NSInteger revision) {
     NSInteger status = 0;
     unsigned long long expectedLength = ULLONG_MAX;
     NSMutableData *initialBody = nil;
     NSString *failureReason = nil;
-    int socketFD = VCMOpenLocalRequest(@"/media",
+    int socketFD = VCMOpenLocalRequest([NSString stringWithFormat:@"/media?revision=%ld", (long)revision],
                                        &status,
                                        &expectedLength,
                                        &initialBody,
@@ -533,7 +533,7 @@ static BOOL VCMDownloadMedia(NSString *destinationPath) {
                               (long)revision, safeExtension];
         NSString *path = [NSTemporaryDirectory() stringByAppendingPathComponent:filename];
 
-        if (!VCMDownloadMedia(path)) {
+        if (!VCMDownloadMedia(path, revision)) {
             [self->_lock lock];
             self->_loading = NO;
             self->_loadingRevision = -1;
