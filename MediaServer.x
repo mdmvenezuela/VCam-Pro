@@ -41,6 +41,72 @@ static uint32_t g_vcmLastReportedFrames = 0;
 static _Atomic(uint32_t) g_vcmUnreplacedCount = 0;
 static const uint16_t kVCMStatusPort = 47831;
 
+static _Atomic(uint32_t) g_vcmOrientationDiagnosticCount = 0;
+
+static NSString *VCMDescribeDictionaryKeys(CFDictionaryRef dictionary) {
+    if (!dictionary) return @"[]";
+    CFIndex count = CFDictionaryGetCount(dictionary);
+    if (count <= 0) return @"[]";
+    const void **keys = calloc((size_t)count, sizeof(void *));
+    if (!keys) return @"[allocation-failed]";
+    CFDictionaryGetKeysAndValues(dictionary, keys, NULL);
+    NSMutableArray<NSString *> *names = [NSMutableArray arrayWithCapacity:(NSUInteger)count];
+    for (CFIndex index = 0; index < count; index++) {
+        const void *key = keys[index];
+        if (!key) continue;
+        if (CFGetTypeID(key) == CFStringGetTypeID()) {
+            [names addObject:(__bridge NSString *)key];
+        } else {
+            [names addObject:[NSString stringWithFormat:@"<%s>", CFGetTypeID(key) == CFNumberGetTypeID() ? "number" : "non-string"]];
+        }
+    }
+    free(keys);
+    [names sortUsingSelector:@selector(compare:)];
+    return [NSString stringWithFormat:@"[%@]", [names componentsJoinedByString:@","]];
+}
+
+static void VCMLogCameraFrameContract(id object, CMSampleBufferRef sampleBuffer,
+                                      CVPixelBufferRef pixelBuffer) {
+    uint32_t index = atomic_fetch_add_explicit(&g_vcmOrientationDiagnosticCount, 1,
+                                               memory_order_relaxed);
+    if (index >= 24) return;
+
+    CMFormatDescriptionRef format = CMSampleBufferGetFormatDescription(sampleBuffer);
+    CMVideoDimensions formatDimensions = {0, 0};
+    CFDictionaryRef formatExtensions = NULL;
+    if (format && CMFormatDescriptionGetMediaType(format) == kCMMediaType_Video) {
+        formatDimensions = CMVideoFormatDescriptionGetDimensions(
+            (CMVideoFormatDescriptionRef)format);
+        formatExtensions = CMFormatDescriptionGetExtensions(format);
+    }
+
+    CFDictionaryRef propagated = CVBufferGetAttachments(
+        pixelBuffer, kCVAttachmentMode_ShouldPropagate);
+    CFDictionaryRef nonPropagated = CVBufferGetAttachments(
+        pixelBuffer, kCVAttachmentMode_ShouldNotPropagate);
+    CFDictionaryRef sampleAttachments = CMCopyDictionaryOfAttachments(
+        kCFAllocatorDefault, sampleBuffer, kCMAttachmentMode_ShouldPropagate);
+    CFArrayRef perSample = CMSampleBufferGetSampleAttachmentsArray(sampleBuffer, false);
+    CFDictionaryRef perSampleDictionary = perSample && CFArrayGetCount(perSample) > 0
+        ? (CFDictionaryRef)CFArrayGetValueAtIndex(perSample, 0) : NULL;
+
+    NSLog(@"[VCam Pro/OrientationDiag] #%u node=%s pixel=%zux%zu format=%dx%d pixelFormat=%u formatExt=%@ pixelProp=%@ pixelNoProp=%@ sampleProp=%@ sampleEntry=%@",
+          index + 1,
+          object_getClassName(object),
+          CVPixelBufferGetWidth(pixelBuffer),
+          CVPixelBufferGetHeight(pixelBuffer),
+          formatDimensions.width,
+          formatDimensions.height,
+          (unsigned int)CVPixelBufferGetPixelFormatType(pixelBuffer),
+          VCMDescribeDictionaryKeys(formatExtensions),
+          VCMDescribeDictionaryKeys(propagated),
+          VCMDescribeDictionaryKeys(nonPropagated),
+          VCMDescribeDictionaryKeys(sampleAttachments),
+          VCMDescribeDictionaryKeys(perSampleDictionary));
+
+    if (sampleAttachments) CFRelease(sampleAttachments);
+}
+
 static BOOL VCMSendStatusBytes(int fd, const void *bytes, size_t length) {
     const uint8_t *cursor = (const uint8_t *)bytes;
     size_t sent = 0;
@@ -370,6 +436,8 @@ static void VCMEmitSampleBuffer(id object,
         original(object, selector, sampleBuffer);
         return;
     }
+
+    VCMLogCameraFrameContract(object, sampleBuffer, (CVPixelBufferRef)inputImageBuffer);
 
     CVPixelBufferRef replacementPixelBuffer =
         [source copyReplacementPixelBufferMatching:(CVPixelBufferRef)inputImageBuffer];
