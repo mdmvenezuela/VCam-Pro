@@ -26,6 +26,7 @@ typedef NS_ENUM(NSInteger, VCamMediaMode) {
               completion:(void (^)(BOOL success, NSError * _Nullable error))completion;
 
 - (void)setZoom:(CGFloat)zoom offsetX:(CGFloat)offsetX offsetY:(CGFloat)offsetY;
+- (void)setRotationDegrees:(NSInteger)rotationDegrees;
 - (void)start;
 - (void)stop;
 
