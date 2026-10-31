@@ -13,6 +13,8 @@
 #import <sys/stat.h>
 #import <unistd.h>
 #import <string.h>
+#import <stdlib.h>
+#import <limits.h>
 
 static const uint16_t kVCamMediaServerPort = 47831;
 static NSString * const kVCamSystemReplacementAttachment =
@@ -23,21 +25,6 @@ static BOOL VCMWriteAll(int fd, const void *bytes, size_t length) {
     size_t offset = 0;
     while (offset < length) {
         ssize_t amount = write(fd, cursor + offset, length - offset);
-        if (amount < 0) {
-            if (errno == EINTR) continue;
-            return NO;
-        }
-        if (amount == 0) return NO;
-        offset += (size_t)amount;
-    }
-    return YES;
-}
-
-static BOOL VCMReadAll(int fd, void *bytes, size_t length) {
-    uint8_t *cursor = (uint8_t *)bytes;
-    size_t offset = 0;
-    while (offset < length) {
-        ssize_t amount = recv(fd, cursor + offset, length - offset, 0);
         if (amount < 0) {
             if (errno == EINTR) continue;
             return NO;
@@ -395,6 +382,12 @@ static BOOL VCMDownloadMedia(NSString *destinationPath) {
                              type:(NSString *)type
                         extension:(NSString *)extension {
     dispatch_async(_decodeQueue, ^{
+        if (self->_reader.status == AVAssetReaderStatusReading) {
+            [self->_reader cancelReading];
+        }
+        self->_reader = nil;
+        self->_readerOutput = nil;
+
         NSString *safeExtension = extension.lowercaseString;
         NSCharacterSet *allowed = [NSCharacterSet characterSetWithCharactersInString:
                                    @"abcdefghijklmnopqrstuvwxyz0123456789"];
@@ -503,8 +496,10 @@ static BOOL VCMDownloadMedia(NSString *destinationPath) {
 }
 
 - (void)prefetchVideoFrames {
-    if (_prefetchScheduled) return;
-    _prefetchScheduled = YES;
+    @synchronized (self) {
+        if (_prefetchScheduled) return;
+        _prefetchScheduled = YES;
+    }
 
     dispatch_async(_decodeQueue, ^{
         @autoreleasepool {
@@ -554,7 +549,9 @@ static BOOL VCMDownloadMedia(NSString *destinationPath) {
                 CFRelease(sample);
                 attempts++;
             }
-            self->_prefetchScheduled = NO;
+            @synchronized (self) {
+                self->_prefetchScheduled = NO;
+            }
         }
     });
 }
@@ -572,12 +569,14 @@ static BOOL VCMDownloadMedia(NSString *destinationPath) {
 
     CIImage *sourceImage = nil;
     VCMVideoFrame *frameToRender = nil;
+    BOOL videoMode = NO;
 
     [_lock lock];
     BOOL active = _enabled && !_loading;
     if (active && [_mediaType isEqualToString:@"image"]) {
         sourceImage = _stillImage;
     } else if (active && [_mediaType isEqualToString:@"video"]) {
+        videoMode = YES;
         if (_videoFrames.count > 0) {
             frameToRender = _videoFrames.firstObject;
             [_videoFrames removeObjectAtIndex:0];
@@ -631,7 +630,7 @@ static BOOL VCMDownloadMedia(NSString *destinationPath) {
                           kCFBooleanTrue,
                           kCVAttachmentMode_ShouldPropagate);
 
-    if ([_mediaType isEqualToString:@"video"]) {
+    if (videoMode) {
         [_lock lock];
         NSUInteger queued = _videoFrames.count;
         [_lock unlock];
