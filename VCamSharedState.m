@@ -640,7 +640,7 @@ static BOOL VCamSendAll(int socketFD, const void *bytes, size_t length) {
         NSError *jsonError = nil;
         id object = [NSJSONSerialization JSONObjectWithData:body options:0 error:&jsonError];
         if (![object isKindOfClass:[NSDictionary class]]) {
-            NSData *responseBody = [@"Invalid engine status JSON" dataUsingEncoding:NSUTF8StringEncoding];
+        NSData *responseBody = [@"OK" dataUsingEncoding:NSUTF8StringEncoding];
             NSString *responseHeader = [NSString stringWithFormat:
                 @"HTTP/1.1 400 Bad Request\r\nContent-Length: %lu\r\nConnection: close\r\n\r\n",
                 (unsigned long)responseBody.length];
