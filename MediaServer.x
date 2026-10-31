@@ -36,6 +36,7 @@ static _Atomic(uint32_t) g_vcmInstallQueued = 0;
 static NSLock *g_vcmHookLock;
 static dispatch_queue_t g_vcmStatusQueue;
 static NSString *g_vcmLastReportedStatus;
+static NSString *g_vcmLastReportedDetail;
 static uint32_t g_vcmLastReportedFrames = 0;
 static _Atomic(uint32_t) g_vcmUnreplacedCount = 0;
 static const uint16_t kVCMStatusPort = 47831;
@@ -64,8 +65,9 @@ void VCMReportEngineStatus(NSString *status, NSString *detail) {
         uint32_t hooks = atomic_load_explicit(&g_vcmHookCount, memory_order_acquire);
         uint32_t frames = atomic_load_explicit(&g_vcmReplacementCount, memory_order_relaxed);
         BOOL changed = ![g_vcmLastReportedStatus isEqualToString:safeStatus];
+        BOOL detailChanged = ![g_vcmLastReportedDetail isEqualToString:safeDetail];
         BOOL progressed = frames >= g_vcmLastReportedFrames + 120;
-        if (!changed && !progressed) return;
+        if (!changed && !detailChanged && !progressed) return;
 
         NSDictionary *payload = @{
             @"status": safeStatus,
@@ -107,6 +109,7 @@ void VCMReportEngineStatus(NSString *status, NSString *detail) {
 
         if (sent) {
             g_vcmLastReportedStatus = safeStatus;
+            g_vcmLastReportedDetail = safeDetail;
             g_vcmLastReportedFrames = frames;
         }
     });
