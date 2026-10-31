@@ -55,7 +55,7 @@ static void VCMAppendOrientationDiagnostic(NSString *message) {
         NSLog(@"[VCam Pro/OrientationDiag] No se pudo abrir el archivo de diagnóstico: %s", strerror(errno));
         return;
     }
-    NSString *line = [message stringByAppendingString:@"\\n"];
+    NSString *line = [message stringByAppendingString:@"\n"];
     NSData *data = [line dataUsingEncoding:NSUTF8StringEncoding];
     const uint8_t *bytes = data.bytes;
     size_t remaining = data.length;
