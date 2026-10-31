@@ -173,19 +173,11 @@ static VCMEmitSampleBufferFunction VCMOriginalForObject(id object, SEL selector)
     return NULL;
 }
 
-static BOOL VCMIsOrientationMetadataKey(CFStringRef key) {
-    if (!key || CFGetTypeID(key) != CFStringGetTypeID()) return NO;
-    return CFStringFind(key, CFSTR("orientation"), kCFCompareCaseInsensitive).location != kCFNotFound ||
-           CFStringFind(key, CFSTR("rotation"), kCFCompareCaseInsensitive).location != kCFNotFound ||
-           CFStringFind(key, CFSTR("transform"), kCFCompareCaseInsensitive).location != kCFNotFound;
-}
-
 static void VCMCopyAttachmentEntry(const void *key,
                                     const void *value,
                                     void *context) {
-    // Keep color/timing/camera metadata, but not orientation instructions.
-    if (key && value && context &&
-        !VCMIsOrientationMetadataKey((CFStringRef)key)) {
+    // Preserve the complete camera attachment contract, including orientation.
+    if (key && value && context) {
         CFDictionarySetValue((CFMutableDictionaryRef)context, key, value);
     }
 }
