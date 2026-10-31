@@ -315,7 +315,6 @@ static void VCamShowMenu(void) {
         preferredStyle:UIAlertControllerStyleActionSheet
     ];
 
-    __weak typeof(alert) weakAlert = alert;
 
     [alert addAction:[
         UIAlertAction actionWithTitle:@"Seleccionar vídeo"
