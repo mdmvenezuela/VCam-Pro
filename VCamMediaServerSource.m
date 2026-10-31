@@ -406,6 +406,8 @@ static BOOL VCMDownloadMedia(NSString *destinationPath) {
             self->_failedRevision = revision;
             [self->_lock unlock];
             NSLog(@"[VCam Pro/MediaServer] No se pudo descargar el medio desde SpringBoard.");
+            VCMReportEngineStatus(@"media_download_failed",
+                @"mediaserverd no pudo descargar el archivo seleccionado desde SpringBoard.");
             return;
         }
 
@@ -434,6 +436,8 @@ static BOOL VCMDownloadMedia(NSString *destinationPath) {
                 self->_loading = NO;
                 self->_loadingRevision = -1;
                 [self->_lock unlock];
+                VCMReportEngineStatus(@"media_loaded",
+                    [NSString stringWithFormat:@"Imagen cargada correctamente (revisión %ld).", (long)revision]);
                 success = YES;
             }
         } else {
@@ -473,6 +477,8 @@ static BOOL VCMDownloadMedia(NSString *destinationPath) {
                         self->_loading = NO;
                         self->_loadingRevision = -1;
                         [self->_lock unlock];
+                        VCMReportEngineStatus(@"media_loaded",
+                            [NSString stringWithFormat:@"Vídeo cargado correctamente (revisión %ld).", (long)revision]);
                         success = YES;
                     }
                 }
@@ -487,6 +493,8 @@ static BOOL VCMDownloadMedia(NSString *destinationPath) {
             self->_failedRevision = revision;
             [self->_lock unlock];
             NSLog(@"[VCam Pro/MediaServer] No se pudo preparar el medio %@.", path.lastPathComponent);
+            VCMReportEngineStatus(@"media_decode_failed",
+                @"El archivo llegó a mediaserverd, pero AVFoundation no pudo preparar la imagen o vídeo.");
         } else {
             NSLog(@"[VCam Pro/MediaServer] Medio listo: %@ (rev %ld).",
                   path.lastPathComponent, (long)revision);
