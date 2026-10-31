@@ -669,7 +669,7 @@ static BOOL VCamSendAll(int socketFD, const void *bytes, size_t length) {
         _engineLastSeen = [NSDate date].timeIntervalSince1970;
         [_stateLock unlock];
 
-        NSData *responseBody = [@"{\\"ok\\":true}" dataUsingEncoding:NSUTF8StringEncoding];
+        NSData *responseBody = [@"{\"ok\":true}" dataUsingEncoding:NSUTF8StringEncoding];
         NSString *responseHeader = [NSString stringWithFormat:
             @"HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: %lu\r\nConnection: close\r\n\r\n",
             (unsigned long)responseBody.length];
