@@ -34,6 +34,7 @@ static BOOL g_vcamEnabled = NO;
 static CGFloat g_vcamZoom = 1.0;
 static CGFloat g_vcamOffsetX = 0.0;
 static CGFloat g_vcamOffsetY = 0.0;
+static NSInteger g_vcamRotationDegrees = 0;
 static CGFloat g_vcamButtonX = 0.92;
 static CGFloat g_vcamButtonY = 0.24;
 static NSInteger g_lastMediaRevision = -1;
@@ -67,7 +68,6 @@ static void VCamCreateOverlay(void);
 static void VCamShowMenu(void);
 static void VCamUpdateButton(void);
 static BOOL VCamIsEnabled(void);
-static void VCamPostControlAsync(NSDictionary *control);
 static void VCamClampButton(void);
 static void VCamShowAdjustmentPanel(void);
 static void VCamCloseAdjustmentPanel(void);
@@ -406,13 +406,6 @@ static NSString *VCamDownloadCurrentMedia(NSString *extension, NSInteger revisio
     return path;
 }
 
-static void VCamPostControlAsync(NSDictionary *control) {
-    if (![control isKindOfClass:[NSDictionary class]] || control.count == 0) return;
-    dispatch_async(dispatch_get_global_queue(QOS_CLASS_UTILITY, 0), ^{
-        if (VCamHTTPPostJSON(@"/control", control)) VCamRefreshFromServer();
-    });
-}
-
 static void VCamRefreshFromServer(void) {
     if (!g_syncQueue) return;
 
@@ -426,6 +419,7 @@ static void VCamRefreshFromServer(void) {
         CGFloat zoom = [state[@"zoom"] doubleValue];
         CGFloat offsetX = [state[@"offsetX"] doubleValue];
         CGFloat offsetY = [state[@"offsetY"] doubleValue];
+        NSInteger rotationDegrees = [state[@"rotationDegrees"] integerValue];
         CGFloat buttonX = [state[@"buttonX"] doubleValue];
         CGFloat buttonY = [state[@"buttonY"] doubleValue];
 
@@ -434,6 +428,7 @@ static void VCamRefreshFromServer(void) {
         g_vcamZoom = MAX(0.5, MIN(4.0, zoom));
         g_vcamOffsetX = MAX(-1.0, MIN(1.0, offsetX));
         g_vcamOffsetY = MAX(-1.0, MIN(1.0, offsetY));
+        g_vcamRotationDegrees = ((rotationDegrees % 360) + 360) % 360;
         g_vcamButtonX = MAX(0.04, MIN(0.96, buttonX));
         g_vcamButtonY = MAX(0.04, MIN(0.96, buttonY));
 
@@ -984,7 +979,7 @@ static NSData *VCamEncodeJPEGAsUTI(NSData *jpegData, NSString *uti) {
             CGFloat normalizedY = self.center.y / MAX(1.0, CGRectGetHeight(container.bounds));
             g_vcamButtonX = MAX(0.04, MIN(0.96, normalizedX));
             g_vcamButtonY = MAX(0.04, MIN(0.96, normalizedY));
-            VCamPostControlAsync(@{@"buttonX": @(g_vcamButtonX), @"buttonY": @(g_vcamButtonY)});
+            [[VCamSharedState sharedState] setButtonNormalizedX:g_vcamButtonX y:g_vcamButtonY];
         }];
     }
 }
@@ -1115,16 +1110,19 @@ static NSData *VCamEncodeJPEGAsUTI(NSData *jpegData, NSString *uti) {
     UIButton *reset = [self controlButton:@"↺" action:@selector(resetTransform)];
     UIButton *right = [self controlButton:@"→" action:@selector(moveRight)];
     UIButton *down = [self controlButton:@"↓" action:@selector(moveDown)];
+    UIButton *rotate = [self controlButton:@"↻" action:@selector(rotateClockwise)];
     up.tag = 4810;
     left.tag = 4811;
     reset.tag = 4812;
     right.tag = 4813;
     down.tag = 4814;
+    rotate.tag = 4817;
     [self addSubview:up];
     [self addSubview:left];
     [self addSubview:reset];
     [self addSubview:right];
     [self addSubview:down];
+    [self addSubview:rotate];
 
     UIButton *zoomOut = [self controlButton:@"−" action:@selector(zoomOut)];
     UIButton *zoomIn = [self controlButton:@"+" action:@selector(zoomIn)];
@@ -1165,6 +1163,7 @@ static NSData *VCamEncodeJPEGAsUTI(NSData *jpegData, NSString *uti) {
     [self viewWithTag:4812].frame = CGRectMake(centerX - controlWidth * 0.5, 188, controlWidth, controlHeight);
     [self viewWithTag:4813].frame = CGRectMake(centerX + 40 - controlWidth * 0.5, 188, controlWidth, controlHeight);
     [self viewWithTag:4814].frame = CGRectMake(centerX - controlWidth * 0.5, 220, controlWidth, controlHeight);
+    [self viewWithTag:4817].frame = CGRectMake(centerX + 80 - controlWidth * 0.5, 188, controlWidth, controlHeight);
 
     [self viewWithTag:4815].frame = CGRectMake(centerX - 66, 258, 38, 27);
     self.zoomLabel.frame = CGRectMake(centerX - 25, 258, 50, 27);
@@ -1183,15 +1182,20 @@ static NSData *VCamEncodeJPEGAsUTI(NSData *jpegData, NSString *uti) {
 
     CGFloat width = CGRectGetWidth(self.previewContainer.bounds);
     CGFloat height = CGRectGetHeight(self.previewContainer.bounds);
-    CGFloat scale = MAX(width / imageSize.width, height / imageSize.height) * g_vcamZoom;
+    NSInteger rotation = ((g_vcamRotationDegrees % 360) + 360) % 360;
+    BOOL swapsDimensions = rotation == 90 || rotation == 270;
+    CGSize orientedSize = swapsDimensions
+        ? CGSizeMake(imageSize.height, imageSize.width)
+        : imageSize;
+    CGFloat scale = MAX(width / orientedSize.width, height / orientedSize.height) * g_vcamZoom;
     CGFloat renderedWidth = imageSize.width * scale;
     CGFloat renderedHeight = imageSize.height * scale;
     CGFloat centerX = width * 0.5 + g_vcamOffsetX * width;
     CGFloat centerY = height * 0.5 - g_vcamOffsetY * height;
-    self.previewImageView.frame = CGRectMake(centerX - renderedWidth * 0.5,
-                                             centerY - renderedHeight * 0.5,
-                                             renderedWidth,
-                                             renderedHeight);
+    self.previewImageView.transform = CGAffineTransformIdentity;
+    self.previewImageView.bounds = CGRectMake(0, 0, renderedWidth, renderedHeight);
+    self.previewImageView.center = CGPointMake(centerX, centerY);
+    self.previewImageView.transform = CGAffineTransformMakeRotation((CGFloat)rotation * (CGFloat)M_PI / 180.0);
 }
 
 - (void)reloadPreview {
@@ -1254,11 +1258,10 @@ static NSData *VCamEncodeJPEGAsUTI(NSData *jpegData, NSString *uti) {
     g_vcamZoom = MAX(0.5, MIN(4.0, g_vcamZoom));
     g_vcamOffsetX = MAX(-1.0, MIN(1.0, g_vcamOffsetX));
     g_vcamOffsetY = MAX(-1.0, MIN(1.0, g_vcamOffsetY));
-    VCamPostControlAsync(@{
-        @"zoom": @(g_vcamZoom),
-        @"offsetX": @(g_vcamOffsetX),
-        @"offsetY": @(g_vcamOffsetY)
-    });
+    [[VCamSharedState sharedState] setTransformWithZoom:g_vcamZoom
+                                                 offsetX:g_vcamOffsetX
+                                                 offsetY:g_vcamOffsetY
+                                         rotationDegrees:g_vcamRotationDegrees];
     [self refreshFraming];
 }
 
@@ -1268,6 +1271,7 @@ static NSData *VCamEncodeJPEGAsUTI(NSData *jpegData, NSString *uti) {
 - (void)moveRight { g_vcamOffsetX += 0.06; [self publishTransform]; }
 - (void)zoomIn { g_vcamZoom += 0.1; [self publishTransform]; }
 - (void)zoomOut { g_vcamZoom -= 0.1; [self publishTransform]; }
+- (void)rotateClockwise { g_vcamRotationDegrees = (g_vcamRotationDegrees + 90) % 360; [self publishTransform]; }
 
 - (void)resetTransform {
     g_vcamZoom = 1.0;
@@ -1545,7 +1549,7 @@ static void VCamShowMenu(void) {
     if (!g_overlayController || g_overlayController.presentedViewController ||
         [UIApplication sharedApplication].applicationState != UIApplicationStateActive) return;
 
-    NSString *message = g_vcamEnabled ? @"Cámara virtual activada" : @"Cámara virtual desactivada";
+    NSString *message = [VCamSharedState sharedState].enabled ? @"Cámara virtual activada" : @"Cámara virtual desactivada";
     UIAlertController *menu = [UIAlertController alertControllerWithTitle:@"VCam Pro"
                                                                   message:message
                                                            preferredStyle:UIAlertControllerStyleActionSheet];
@@ -1558,18 +1562,18 @@ static void VCamShowMenu(void) {
         });
     }]];
 
-    NSString *toggleTitle = g_vcamEnabled ? @"Desactivar cámara virtual" : @"Activar cámara virtual";
+    NSString *toggleTitle = [VCamSharedState sharedState].enabled ? @"Desactivar cámara virtual" : @"Activar cámara virtual";
     [menu addAction:[UIAlertAction actionWithTitle:toggleTitle
                                              style:UIAlertActionStyleDefault
                                            handler:^(UIAlertAction *action) {
-        BOOL nextEnabled = !VCamIsEnabled();
+        BOOL nextEnabled = ![VCamSharedState sharedState].enabled;
+        [[VCamSharedState sharedState] setEnabled:nextEnabled];
         VCamSetLocalEnabled(nextEnabled);
         VCamSetPreviewOverlaysVisible(nextEnabled);
         VCamUpdateButton();
         [[MediaManager sharedManager] setZoom:g_vcamZoom offsetX:g_vcamOffsetX offsetY:g_vcamOffsetY];
         if (nextEnabled) [[MediaManager sharedManager] start];
         else [[MediaManager sharedManager] stop];
-        VCamPostControlAsync(@{@"enabled": @(nextEnabled)});
     }]];
 
     [menu addAction:[UIAlertAction actionWithTitle:@"Vista previa y encuadre"
