@@ -42,6 +42,9 @@ static dispatch_queue_t g_syncQueue;
 static UIWindow *g_overlayWindow = nil;
 static UIViewController *g_overlayController = nil;
 static UIButton *g_floatButton = nil;
+@class VCamAdjustmentPanel;
+static VCamAdjustmentPanel *g_adjustmentPanel = nil;
+static NSInteger g_adjustmentPreviewRevision = -1;
 static id g_pickerDelegate = nil;
 static NSMutableArray *g_lifecycleObservers = nil;
 static char g_darwinObserverToken;
@@ -66,6 +69,8 @@ static void VCamUpdateButton(void);
 static BOOL VCamIsEnabled(void);
 static void VCamPostControlAsync(NSDictionary *control);
 static void VCamClampButton(void);
+static void VCamShowAdjustmentPanel(void);
+static void VCamCloseAdjustmentPanel(void);
 
 static BOOL VCamIsEnabled(void) {
     @synchronized ([MediaManager class]) {
