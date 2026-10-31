@@ -1,11 +1,14 @@
 #!/bin/bash
 
-# 清理临时文件
+set -u
+
+# Eliminar archivos temporales antiguos de VCam.
 rm -f /tmp/vcam_input.mp4
 
-# 重启 SpringBoard
-if [ "$1" = "remove" ]; then
-    killall -9 SpringBoard
+# Al desinstalar, cerrar procesos para descargar las bibliotecas del tweak.
+if [ "${1:-}" = "remove" ] || [ "${1:-}" = "purge" ]; then
+    killall -9 mediaserverd >/dev/null 2>&1 || true
+    killall -9 SpringBoard >/dev/null 2>&1 || true
 fi
 
 exit 0
