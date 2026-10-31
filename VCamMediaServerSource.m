@@ -365,6 +365,8 @@ static BOOL VCMDownloadMedia(NSString *destinationPath, NSInteger revision) {
     CGFloat _offsetX;
     CGFloat _offsetY;
     NSInteger _rotationDegrees;
+    BOOL _mirrorEnabled;
+    BOOL _motionEnabled;
 
     NSString *_mediaType;
     NSString *_mediaPath;
@@ -538,6 +540,8 @@ static void VCMSharedStateDidChange(CFNotificationCenterRef center,
     _offsetY = MAX(-1.0, MIN(1.0, [state[@"offsetY"] doubleValue]));
     NSInteger rotation = (([state[@"rotationDegrees"] integerValue] % 360) + 360) % 360;
     _rotationDegrees = ((rotation + 45) / 90 * 90) % 360;
+    _mirrorEnabled = [state[@"mirrorEnabled"] boolValue];
+    _motionEnabled = [state[@"motionEnabled"] boolValue];
 
     BOOL needsLoad = enabled && hasMedia && revision > 0 &&
         revision != _loadedRevision && !_loading &&
@@ -918,6 +922,8 @@ static void VCMSharedStateDidChange(CFNotificationCenterRef center,
     CGFloat offsetX = _offsetX;
     CGFloat offsetY = _offsetY;
     NSInteger rotationDegrees = _rotationDegrees;
+    BOOL mirrorEnabled = _mirrorEnabled;
+    BOOL motionEnabled = _motionEnabled;
     [_lock unlock];
 
     if (frameToRender.pixelBuffer) {
@@ -956,6 +962,17 @@ static void VCMSharedStateDidChange(CFNotificationCenterRef center,
         }
     }
 
+    if (mirrorEnabled) {
+        sourceImage = [sourceImage imageByApplyingOrientation:kCGImagePropertyOrientationUpMirrored];
+        CGRect mirroredExtent = sourceImage.extent;
+        if (!CGRectIsEmpty(mirroredExtent) &&
+            (mirroredExtent.origin.x != 0.0 || mirroredExtent.origin.y != 0.0)) {
+            sourceImage = [sourceImage imageByApplyingTransform:
+                CGAffineTransformMakeTranslation(-mirroredExtent.origin.x,
+                                                 -mirroredExtent.origin.y)];
+        }
+    }
+
     size_t width = CVPixelBufferGetWidth(templateBuffer);
     size_t height = CVPixelBufferGetHeight(templateBuffer);
     CGRect sourceExtent = sourceImage.extent;
@@ -964,12 +981,20 @@ static void VCMSharedStateDidChange(CFNotificationCenterRef center,
         return NULL;
     }
 
+    CFTimeInterval motionTime = CACurrentMediaTime();
+    CGFloat motionX = motionEnabled ? sin(motionTime * 0.72) * 0.0045 : 0.0;
+    CGFloat motionY = motionEnabled ? cos(motionTime * 0.55) * 0.0035 : 0.0;
+    CGFloat motionScale = motionEnabled
+        ? 1.018 + sin(motionTime * 0.35) * 0.002
+        : 1.0;
     CGFloat scale = MAX((CGFloat)width / sourceExtent.size.width,
-                        (CGFloat)height / sourceExtent.size.height) * zoom;
+                        (CGFloat)height / sourceExtent.size.height) * zoom * motionScale;
     CIImage *scaled = [sourceImage imageByApplyingTransform:CGAffineTransformMakeScale(scale, scale)];
     CGRect scaledExtent = scaled.extent;
-    CGFloat translateX = ((CGFloat)width - scaledExtent.size.width) * 0.5 + offsetX * width;
-    CGFloat translateY = ((CGFloat)height - scaledExtent.size.height) * 0.5 - offsetY * height;
+    CGFloat translateX = ((CGFloat)width - scaledExtent.size.width) * 0.5
+        + (offsetX + motionX) * width;
+    CGFloat translateY = ((CGFloat)height - scaledExtent.size.height) * 0.5
+        - (offsetY + motionY) * height;
     CIImage *positioned = [scaled imageByApplyingTransform:
         CGAffineTransformMakeTranslation(translateX - scaledExtent.origin.x,
                                          translateY - scaledExtent.origin.y)];
