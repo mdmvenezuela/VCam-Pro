@@ -15,6 +15,8 @@ NS_ASSUME_NONNULL_BEGIN
 @property (nonatomic, assign, readonly) CGFloat offsetX;
 @property (nonatomic, assign, readonly) CGFloat offsetY;
 @property (nonatomic, assign, readonly) NSInteger rotationDegrees;
+@property (nonatomic, assign, readonly) BOOL mirrorEnabled;
+@property (nonatomic, assign, readonly) BOOL motionEnabled;
 @property (nonatomic, assign, readonly) CGFloat buttonX;
 @property (nonatomic, assign, readonly) CGFloat buttonY;
 
@@ -28,6 +30,8 @@ NS_ASSUME_NONNULL_BEGIN
 - (BOOL)importVideoAtURL:(NSURL *)url error:(NSError * _Nullable * _Nullable)error;
 
 - (void)setEnabled:(BOOL)enabled;
+- (void)setMirrorEnabled:(BOOL)enabled;
+- (void)setMotionEnabled:(BOOL)enabled;
 - (void)setTransformWithZoom:(CGFloat)zoom
                     offsetX:(CGFloat)offsetX
                     offsetY:(CGFloat)offsetY
