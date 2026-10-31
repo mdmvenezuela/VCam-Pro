@@ -38,9 +38,16 @@ static BOOL VCMWriteAll(int fd, const void *bytes, size_t length) {
 static int VCMOpenLocalRequest(NSString *path,
                                NSInteger *statusCode,
                                unsigned long long *contentLength,
-                               NSMutableData **initialBody) {
+                               NSMutableData **initialBody,
+                               NSString **failureReason) {
+    if (failureReason) *failureReason = nil;
+
     int fd = socket(AF_INET, SOCK_STREAM, 0);
-    if (fd < 0) return -1;
+    if (fd < 0) {
+        if (failureReason) *failureReason = [NSString stringWithFormat:
+            @"socket() falló: %s", strerror(errno)];
+        return -1;
+    }
 
     int noSignal = 1;
     setsockopt(fd, SOL_SOCKET, SO_NOSIGPIPE, &noSignal, sizeof(noSignal));
@@ -59,6 +66,10 @@ static int VCMOpenLocalRequest(NSString *path,
     address.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
 
     if (connect(fd, (struct sockaddr *)&address, sizeof(address)) != 0) {
+        int savedError = errno;
+        if (failureReason) *failureReason = [NSString stringWithFormat:
+            @"No se pudo conectar a SpringBoard en 127.0.0.1:%u: %s",
+            kVCamMediaServerPort, strerror(savedError)];
         close(fd);
         return -1;
     }
@@ -67,6 +78,9 @@ static int VCMOpenLocalRequest(NSString *path,
         @"GET %@ HTTP/1.1\r\nHost: 127.0.0.1\r\nCache-Control: no-cache\r\nConnection: close\r\n\r\n",
         path];
     if (!VCMWriteAll(fd, request.UTF8String, request.length)) {
+        int savedError = errno;
+        if (failureReason) *failureReason = [NSString stringWithFormat:
+            @"No se pudo enviar GET %@: %s", path, strerror(savedError)];
         close(fd);
         return -1;
     }
@@ -80,10 +94,15 @@ static int VCMOpenLocalRequest(NSString *path,
         ssize_t amount = recv(fd, buffer, sizeof(buffer), 0);
         if (amount < 0) {
             if (errno == EINTR) continue;
+            int savedError = errno;
+            if (failureReason) *failureReason = [NSString stringWithFormat:
+                @"Error esperando la cabecera HTTP de %@: %s", path, strerror(savedError)];
             close(fd);
             return -1;
         }
         if (amount == 0) {
+            if (failureReason) *failureReason = [NSString stringWithFormat:
+                @"SpringBoard cerró la conexión antes de enviar la cabecera de %@.", path];
             close(fd);
             return -1;
         }
@@ -94,6 +113,8 @@ static int VCMOpenLocalRequest(NSString *path,
     }
 
     if (headerRange.location == NSNotFound) {
+        if (failureReason) *failureReason = [NSString stringWithFormat:
+            @"La cabecera HTTP de %@ supera 32 KB o está incompleta.", path];
         close(fd);
         return -1;
     }
@@ -102,6 +123,7 @@ static int VCMOpenLocalRequest(NSString *path,
     NSString *headerText = [[NSString alloc] initWithData:headerData
                                                  encoding:NSUTF8StringEncoding];
     if (!headerText) {
+        if (failureReason) *failureReason = @"SpringBoard devolvió una cabecera HTTP no válida en UTF-8.";
         close(fd);
         return -1;
     }
@@ -110,6 +132,8 @@ static int VCMOpenLocalRequest(NSString *path,
     NSArray<NSString *> *statusParts = headerLines.firstObject
         ? [headerLines.firstObject componentsSeparatedByString:@" "] : @[];
     if (statusParts.count < 2) {
+        if (failureReason) *failureReason = [NSString stringWithFormat:
+            @"Respuesta HTTP mal formada: %@", headerLines.firstObject ?: @"(vacía)"];
         close(fd);
         return -1;
     }
@@ -150,7 +174,7 @@ static NSData *VCMFetchSmallResponse(NSString *path) {
     NSInteger status = 0;
     unsigned long long expectedLength = ULLONG_MAX;
     NSMutableData *body = nil;
-    int fd = VCMOpenLocalRequest(path, &status, &expectedLength, &body);
+    int fd = VCMOpenLocalRequest(path, &status, &expectedLength, &body, NULL);
     if (fd < 0) return nil;
 
     if (status != 200 || expectedLength == ULLONG_MAX || expectedLength > 128 * 1024) {
@@ -178,12 +202,52 @@ static BOOL VCMDownloadMedia(NSString *destinationPath) {
     NSInteger status = 0;
     unsigned long long expectedLength = ULLONG_MAX;
     NSMutableData *initialBody = nil;
-    int socketFD = VCMOpenLocalRequest(@"/media", &status, &expectedLength, &initialBody);
-    if (socketFD < 0) return NO;
+    NSString *failureReason = nil;
+    int socketFD = VCMOpenLocalRequest(@"/media",
+                                       &status,
+                                       &expectedLength,
+                                       &initialBody,
+                                       &failureReason);
+    if (socketFD < 0) {
+        NSString *detail = failureReason ?: @"No se pudo abrir una conexión con SpringBoard.";
+        NSLog(@"[VCam Pro/MediaServer] Descarga de /media fallida: %@", detail);
+        VCMReportEngineStatus(@"media_download_failed", detail);
+        return NO;
+    }
 
-    if (status != 200 || expectedLength == ULLONG_MAX ||
-        expectedLength == 0 || expectedLength > 1024ULL * 1024ULL * 1024ULL) {
+    if (status != 200) {
+        NSString *serverMessage = initialBody.length
+            ? [[NSString alloc] initWithData:[initialBody subdataWithRange:
+                NSMakeRange(0, MIN(initialBody.length, (NSUInteger)256))]
+                                  encoding:NSUTF8StringEncoding]
+            : nil;
+        NSString *detail = [NSString stringWithFormat:
+            @"SpringBoard respondió HTTP %ld al solicitar /media%@.",
+            (long)status,
+            serverMessage.length ? [NSString stringWithFormat:@": %@", serverMessage] : @""];
+        NSLog(@"[VCam Pro/MediaServer] %@", detail);
         close(socketFD);
+        VCMReportEngineStatus(@"media_download_failed", detail);
+        return NO;
+    }
+
+    if (expectedLength == ULLONG_MAX || expectedLength == 0 ||
+        expectedLength > 1024ULL * 1024ULL * 1024ULL) {
+        NSString *detail = [NSString stringWithFormat:
+            @"SpringBoard devolvió Content-Length inválido para /media: %llu.",
+            expectedLength];
+        NSLog(@"[VCam Pro/MediaServer] %@", detail);
+        close(socketFD);
+        VCMReportEngineStatus(@"media_download_failed", detail);
+        return NO;
+    }
+
+    if (initialBody.length > expectedLength) {
+        NSString *detail = [NSString stringWithFormat:
+            @"La respuesta inicial contiene %lu bytes, pero Content-Length declara %llu.",
+            (unsigned long)initialBody.length, expectedLength];
+        close(socketFD);
+        VCMReportEngineStatus(@"media_download_failed", detail);
         return NO;
     }
 
@@ -191,13 +255,24 @@ static BOOL VCMDownloadMedia(NSString *destinationPath) {
                         O_WRONLY | O_CREAT | O_TRUNC,
                         0600);
     if (outputFD < 0) {
+        int savedError = errno;
+        NSString *detail = [NSString stringWithFormat:
+            @"No se pudo crear el archivo temporal de mediaserverd (%@): %s",
+            destinationPath.lastPathComponent, strerror(savedError)];
+        NSLog(@"[VCam Pro/MediaServer] %@", detail);
         close(socketFD);
+        VCMReportEngineStatus(@"media_download_failed", detail);
         return NO;
     }
 
-    BOOL success = initialBody.length <= expectedLength &&
-        VCMWriteAll(outputFD, initialBody.bytes, initialBody.length);
+    BOOL success = VCMWriteAll(outputFD, initialBody.bytes, initialBody.length);
     unsigned long long written = initialBody.length;
+    if (!success) {
+        int savedError = errno;
+        failureReason = [NSString stringWithFormat:
+            @"No se pudo escribir el bloque inicial: %s", strerror(savedError)];
+    }
+
     while (success && written < expectedLength) {
         uint8_t buffer[64 * 1024];
         size_t remaining = (size_t)MIN((unsigned long long)sizeof(buffer),
@@ -205,26 +280,53 @@ static BOOL VCMDownloadMedia(NSString *destinationPath) {
         ssize_t amount = recv(socketFD, buffer, remaining, 0);
         if (amount < 0) {
             if (errno == EINTR) continue;
+            int savedError = errno;
+            failureReason = [NSString stringWithFormat:
+                @"La descarga se interrumpió tras %llu de %llu bytes: %s",
+                written, expectedLength, strerror(savedError)];
             success = NO;
             break;
         }
         if (amount == 0) {
+            failureReason = [NSString stringWithFormat:
+                @"SpringBoard cerró /media tras %llu de %llu bytes.",
+                written, expectedLength];
             success = NO;
             break;
         }
-        success = VCMWriteAll(outputFD, buffer, (size_t)amount);
+        if (!VCMWriteAll(outputFD, buffer, (size_t)amount)) {
+            int savedError = errno;
+            failureReason = [NSString stringWithFormat:
+                @"No se pudo guardar el archivo temporal tras %llu bytes: %s",
+                written, strerror(savedError)];
+            success = NO;
+            break;
+        }
         written += (unsigned long long)amount;
     }
 
-    if (fsync(outputFD) != 0) success = NO;
+    if (success && fsync(outputFD) != 0) {
+        int savedError = errno;
+        failureReason = [NSString stringWithFormat:
+            @"fsync del archivo temporal falló: %s", strerror(savedError)];
+        success = NO;
+    }
     close(outputFD);
     close(socketFD);
 
     if (!success || written != expectedLength) {
         unlink(destinationPath.fileSystemRepresentation);
+        NSString *detail = failureReason ?: [NSString stringWithFormat:
+            @"Descarga incompleta: recibidos %llu de %llu bytes.",
+            written, expectedLength];
+        NSLog(@"[VCam Pro/MediaServer] %@", detail);
+        VCMReportEngineStatus(@"media_download_failed", detail);
         return NO;
     }
+
     chmod(destinationPath.fileSystemRepresentation, 0644);
+    NSLog(@"[VCam Pro/MediaServer] Medio descargado correctamente: %llu bytes.",
+          expectedLength);
     return YES;
 }
 
