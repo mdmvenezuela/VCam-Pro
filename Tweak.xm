@@ -1235,6 +1235,82 @@ static void VCamShowPicker(void) {
     [g_overlayController presentViewController:picker animated:YES completion:nil];
 }
 
+static NSString *VCamEngineStatusExplanation(NSString *status) {
+    if ([status isEqualToString:@"not_reported"]) {
+        return @"mediaserverd no ha confirmado que VCamMediaServer se haya cargado. La inyección del motor todavía no está confirmada.";
+    }
+    if ([status isEqualToString:@"loaded"]) {
+        return @"VCamMediaServer se cargó en mediaserverd y está buscando la salida de cámara del sistema.";
+    }
+    if ([status isEqualToString:@"waiting_for_class"]) {
+        return @"El motor está cargado, pero BWNodeOutput todavía no aparece en el proceso de cámara.";
+    }
+    if ([status isEqualToString:@"waiting_for_hook"]) {
+        return @"BWNodeOutput existe, pero no se encontró un método emitSampleBuffer: compatible para interceptar.";
+    }
+    if ([status isEqualToString:@"hook_not_found"]) {
+        return @"El motor se cargó, pero no pudo instalar el hook de salida de cámara.";
+    }
+    if ([status isEqualToString:@"hook_installed"]) {
+        return @"El hook quedó instalado. Falta confirmar que recibe y sustituye fotogramas.";
+    }
+    if ([status isEqualToString:@"media_download_failed"]) {
+        return @"El hook está activo, pero mediaserverd no pudo descargar el medio seleccionado desde SpringBoard.";
+    }
+    if ([status isEqualToString:@"media_decode_failed"]) {
+        return @"El archivo llegó al motor, pero no se pudo decodificar o preparar.";
+    }
+    if ([status isEqualToString:@"media_loaded"]) {
+        return @"El medio seleccionado ya está cargado en mediaserverd. Falta confirmar la sustitución de fotogramas.";
+    }
+    if ([status isEqualToString:@"hook_active_no_frame"]) {
+        return @"El hook está recibiendo fotogramas de cámara, pero el motor todavía no consigue renderizar el medio virtual.";
+    }
+    if ([status isEqualToString:@"frames_replaced"]) {
+        return @"VCam está sustituyendo fotogramas reales por el medio seleccionado.";
+    }
+    return @"El motor envió un estado desconocido. Revisa el detalle técnico que aparece abajo.";
+}
+
+static void VCamShowEngineDiagnostics(void) {
+    dispatch_async(dispatch_get_global_queue(QOS_CLASS_USER_INITIATED, 0), ^{
+        NSData *data = VCamHTTPGet(@"/state");
+        NSDictionary *state = nil;
+        if (data.length > 0) {
+            NSError *error = nil;
+            id object = [NSJSONSerialization JSONObjectWithData:data options:0 error:&error];
+            if ([object isKindOfClass:[NSDictionary class]]) state = (NSDictionary *)object;
+        }
+
+        dispatch_async(dispatch_get_main_queue(), ^{
+            if (!g_overlayController || g_overlayController.presentedViewController) return;
+
+            NSString *status = [state[@"engineStatus"] isKindOfClass:[NSString class]]
+                ? state[@"engineStatus"] : @"not_reported";
+            NSString *detail = [state[@"engineDetail"] isKindOfClass:[NSString class]]
+                ? state[@"engineDetail"] : @"No se recibió respuesta del servidor de estado.";
+            NSUInteger hooks = [state[@"engineHooks"] unsignedIntegerValue];
+            NSUInteger frames = [state[@"engineFrames"] unsignedIntegerValue];
+
+            NSString *message = state
+                ? [NSString stringWithFormat:@"%@\n\nDetalle: %@\nHooks instalados: %lu\nFotogramas sustituidos: %lu",
+                   VCamEngineStatusExplanation(status),
+                   detail,
+                   (unsigned long)hooks,
+                   (unsigned long)frames]
+                : @"No se pudo consultar el estado compartido de VCam. El servidor de SpringBoard no respondió.";
+
+            UIAlertController *alert = [UIAlertController alertControllerWithTitle:@"Diagnóstico de VCam"
+                                                                            message:message
+                                                                     preferredStyle:UIAlertControllerStyleAlert];
+            [alert addAction:[UIAlertAction actionWithTitle:@"Cerrar"
+                                                      style:UIAlertActionStyleDefault
+                                                    handler:nil]];
+            [g_overlayController presentViewController:alert animated:YES completion:nil];
+        });
+    });
+}
+
 static void VCamShowMenu(void) {
     if (!g_overlayController || g_overlayController.presentedViewController ||
         [UIApplication sharedApplication].applicationState != UIApplicationStateActive) return;
@@ -1271,6 +1347,15 @@ static void VCamShowMenu(void) {
             VCamAdjustmentViewController *controller = [[VCamAdjustmentViewController alloc] init];
             controller.modalPresentationStyle = UIModalPresentationFormSheet;
             [g_overlayController presentViewController:controller animated:YES completion:nil];
+        });
+    }]];
+
+    [menu addAction:[UIAlertAction actionWithTitle:@"Comprobar motor de cámara"
+                                             style:UIAlertActionStyleDefault
+                                           handler:^(UIAlertAction *action) {
+        dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.25 * NSEC_PER_SEC)),
+                       dispatch_get_main_queue(), ^{
+            VCamShowEngineDiagnostics();
         });
     }]];
 
