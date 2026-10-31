@@ -1,6 +1,6 @@
 Package: com.yourname.vcam
 Name: VCam
-Version: 1.4.2
+Version: 1.5.0
 Architecture: iphoneos-arm64e
 Description: System camera frame replacement with AVFoundation fallback
 Maintainer: Your Name
