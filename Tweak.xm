@@ -443,9 +443,9 @@ static void VCamRefreshFromServer(void) {
             if (g_isSpringBoardProcess && g_adjustmentPanel) {
                 if (g_adjustmentPreviewRevision != mediaRevision) {
                     g_adjustmentPreviewRevision = mediaRevision;
-                    [g_adjustmentPanel performSelector:@selector(reloadPreview)];
+                    [(id)g_adjustmentPanel performSelector:@selector(reloadPreview)];
                 }
-                [g_adjustmentPanel performSelector:@selector(refreshFraming)];
+                [(id)g_adjustmentPanel performSelector:@selector(refreshFraming)];
             }
         });
 
