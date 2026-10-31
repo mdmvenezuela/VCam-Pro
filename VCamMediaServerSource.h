@@ -8,6 +8,7 @@ FOUNDATION_EXPORT void VCMReportEngineStatus(NSString *status, NSString *detail)
 @interface VCamMediaServerSource : NSObject
 + (instancetype)sharedSource;
 - (void)startMonitoring;
+- (BOOL)isReplacementEnabled;
 - (nullable CVPixelBufferRef)copyReplacementPixelBufferMatching:(CVPixelBufferRef)templateBuffer CF_RETURNS_RETAINED;
 @end
 
