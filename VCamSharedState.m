@@ -301,6 +301,38 @@ static BOOL VCamSendAll(int socketFD, const void *bytes, size_t length) {
     [_stateLock unlock];
 }
 
+- (void)appendDiagnosticOrientationEvent:(NSString *)event {
+    if (![event isKindOfClass:[NSString class]] || event.length == 0) return;
+    NSString *safeEvent = event.length > 3000 ? [event substringToIndex:3000] : [event copy];
+    NSString *directory = @"/var/mobile/Documents";
+    NSString *path = [directory stringByAppendingPathComponent:@"VCam-OrientationDiag.log"];
+    NSFileManager *fileManager = [NSFileManager defaultManager];
+    [fileManager createDirectoryAtPath:directory
+           withIntermediateDirectories:YES
+                            attributes:nil
+                                 error:nil];
+    @synchronized ([VCamSharedState class]) {
+        if (![fileManager fileExistsAtPath:path]) {
+            [fileManager createFileAtPath:path contents:nil attributes:nil];
+        }
+        NSFileHandle *handle = [NSFileHandle fileHandleForWritingAtPath:path];
+        if (!handle) {
+            NSLog(@"[VCam Pro/OrientationDiag] No se pudo abrir el registro de eventos de orientación.");
+            return;
+        }
+        @try {
+            [handle seekToEndOfFile];
+            NSData *lineData = [[safeEvent stringByAppendingString:@"\\n"] dataUsingEncoding:NSUTF8StringEncoding];
+            [handle writeData:lineData];
+            [handle synchronizeFile];
+            [handle closeFile];
+        } @catch (NSException *exception) {
+            @try { [handle closeFile]; } @catch (__unused NSException *ignored) {}
+            NSLog(@"[VCam Pro/OrientationDiag] Error guardando evento: %@", exception.reason);
+        }
+    }
+}
+
 - (void)publishChange {
     CFNotificationCenterPostNotification(CFNotificationCenterGetDarwinNotifyCenter(),
                                          (__bridge CFStringRef)kVCamDarwinNotification,
