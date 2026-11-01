@@ -82,39 +82,73 @@ static NSString *VCMDescribeDictionaryEntries(CFDictionaryRef dictionary) {
 
 static void VCMSendOrientationDiagnostic(NSString *diagnostic) {
     if (![diagnostic isKindOfClass:[NSString class]] || diagnostic.length == 0) return;
-    NSDictionary *payload = @{@"line": diagnostic};
-    NSData *body = [NSJSONSerialization dataWithJSONObject:payload options:0 error:nil];
-    if (!body || body.length > 8 * 1024) return;
+    NSString *safeDiagnostic = [diagnostic copy];
 
-    int fd = socket(AF_INET, SOCK_STREAM, 0);
-    if (fd < 0) return;
-    int noSignal = 1;
-    setsockopt(fd, SOL_SOCKET, SO_NOSIGPIPE, &noSignal, sizeof(noSignal));
-    struct timeval timeout = {2, 0};
-    setsockopt(fd, SOL_SOCKET, SO_SNDTIMEO, &timeout, sizeof(timeout));
+    // Never block the camera graph while the live console receives an event.
+    dispatch_async(dispatch_get_global_queue(QOS_CLASS_UTILITY, 0), ^{
+        @autoreleasepool {
+            NSDictionary *payload = @{@"line": safeDiagnostic};
+            NSData *body = [NSJSONSerialization dataWithJSONObject:payload options:0 error:nil];
+            if (!body || body.length > 8 * 1024) return;
 
-    struct sockaddr_in address;
-    memset(&address, 0, sizeof(address));
-    address.sin_len = sizeof(address);
-    address.sin_family = AF_INET;
-    address.sin_port = htons(kVCMStatusPort);
-    address.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
-    if (connect(fd, (struct sockaddr *)&address, sizeof(address)) == 0) {
-        NSString *header = [NSString stringWithFormat:
-            @"POST /orientation-diagnostic HTTP/1.1\r\nHost: 127.0.0.1\r\nContent-Type: application/json\r\nContent-Length: %lu\r\nConnection: close\r\n\r\n",
-            (unsigned long)body.length];
-        VCMSendStatusBytes(fd, header.UTF8String, header.length);
-        VCMSendStatusBytes(fd, body.bytes, body.length);
-    }
-    close(fd);
+            int fd = socket(AF_INET, SOCK_STREAM, 0);
+            if (fd < 0) return;
+            int noSignal = 1;
+            setsockopt(fd, SOL_SOCKET, SO_NOSIGPIPE, &noSignal, sizeof(noSignal));
+            struct timeval timeout = {1, 0};
+            setsockopt(fd, SOL_SOCKET, SO_SNDTIMEO, &timeout, sizeof(timeout));
+
+            struct sockaddr_in address;
+            memset(&address, 0, sizeof(address));
+            address.sin_len = sizeof(address);
+            address.sin_family = AF_INET;
+            address.sin_port = htons(kVCMStatusPort);
+            address.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
+            if (connect(fd, (struct sockaddr *)&address, sizeof(address)) == 0) {
+                NSString *header = [NSString stringWithFormat:
+                    @"POST /orientation-diagnostic HTTP/1.1\r\nHost: 127.0.0.1\r\nContent-Type: application/json\r\nContent-Length: %lu\r\nConnection: close\r\n\r\n",
+                    (unsigned long)body.length];
+                VCMSendStatusBytes(fd, header.UTF8String, header.length);
+                VCMSendStatusBytes(fd, body.bytes, body.length);
+            }
+            close(fd);
+        }
+    });
+}
+
+void VCMReportOrientationDiagnostic(NSString *line) {
+    if (![line isKindOfClass:[NSString class]] || line.length == 0) return;
+    g_vcmLastOrientationDiagnostic = [line copy];
+    VCMSendOrientationDiagnostic(line);
+}
+
+static NSLock *g_vcmOrientationThrottleLock;
+static NSMutableDictionary<NSString *, NSNumber *> *g_vcmOrientationLastEmission;
+
+static BOOL VCMShouldEmitOrientationDiagnosticForKey(NSString *key) {
+    static dispatch_once_t onceToken;
+    dispatch_once(&onceToken, ^{
+        g_vcmOrientationThrottleLock = [[NSLock alloc] init];
+        g_vcmOrientationLastEmission = [NSMutableDictionary dictionary];
+    });
+
+    CFTimeInterval now = NSProcessInfo.processInfo.systemUptime;
+    [g_vcmOrientationThrottleLock lock];
+    NSNumber *last = g_vcmOrientationLastEmission[key];
+    BOOL shouldEmit = !last || (now - last.doubleValue) >= 0.75;
+    if (shouldEmit) g_vcmOrientationLastEmission[key] = @(now);
+    [g_vcmOrientationThrottleLock unlock];
+    return shouldEmit;
 }
 
 static void VCMLogCameraFrameContract(id object, CMSampleBufferRef sampleBuffer,
                                       CVPixelBufferRef pixelBuffer) {
-    uint32_t index = atomic_fetch_add_explicit(&g_vcmOrientationDiagnosticCount, 1,
-                                               memory_order_relaxed);
-    if (index >= 24) return;
+    if (!sampleBuffer || !pixelBuffer) return;
+    NSString *node = [NSString stringWithUTF8String:object_getClassName(object)] ?: @"unknown";
+    if (!VCMShouldEmitOrientationDiagnosticForKey([@"FRAME_RECEIVED/" stringByAppendingString:node])) return;
 
+    uint32_t index = atomic_fetch_add_explicit(&g_vcmOrientationDiagnosticCount, 1,
+                                               memory_order_relaxed) + 1;
     CMFormatDescriptionRef format = CMSampleBufferGetFormatDescription(sampleBuffer);
     CMVideoDimensions formatDimensions = {0, 0};
     CFDictionaryRef formatExtensions = NULL;
@@ -134,27 +168,26 @@ static void VCMLogCameraFrameContract(id object, CMSampleBufferRef sampleBuffer,
     CFDictionaryRef perSampleDictionary = perSample && CFArrayGetCount(perSample) > 0
         ? (CFDictionaryRef)CFArrayGetValueAtIndex(perSample, 0) : NULL;
 
-    NSDate *receivedAt = [NSDate date];
     NSString *diagnostic = [NSString stringWithFormat:
-        @"[VCam Pro/OrientationDiag] FRAME_RECEIVED timestamp=%.3f uptime=%.3f #%u node=%s pixel=%zux%zu rowBytes=%zu format=%dx%d pixelFormat=%u formatExtValues=%@ pixelPropValues=%@ pixelNoPropValues=%@ samplePropValues=%@ sampleEntryValues=%@",
-        receivedAt.timeIntervalSince1970,
+        @"[VCam Pro/LiveDiag] FRAME_RECEIVED timestamp=%.3f uptime=%.3f #%u node=%@ pixel=%zux%zu rowBytes=%zu format=%dx%d pixelFormat=%u pts=%.6f formatExt=%@ pixelProp=%@ pixelNoProp=%@ sampleProp=%@ sampleEntry=%@",
+        [NSDate date].timeIntervalSince1970,
         NSProcessInfo.processInfo.systemUptime,
-        index + 1,
-        object_getClassName(object),
+        index,
+        node,
         CVPixelBufferGetWidth(pixelBuffer),
         CVPixelBufferGetHeight(pixelBuffer),
         CVPixelBufferGetBytesPerRow(pixelBuffer),
         formatDimensions.width,
         formatDimensions.height,
         (unsigned int)CVPixelBufferGetPixelFormatType(pixelBuffer),
+        CMTimeGetSeconds(CMSampleBufferGetPresentationTimeStamp(sampleBuffer)),
         VCMDescribeDictionaryEntries(formatExtensions),
         VCMDescribeDictionaryEntries(propagated),
         VCMDescribeDictionaryEntries(nonPropagated),
         VCMDescribeDictionaryEntries(sampleAttachments),
         VCMDescribeDictionaryEntries(perSampleDictionary)];
-    g_vcmLastOrientationDiagnostic = [diagnostic copy];
     NSLog(@"%@", diagnostic);
-    VCMSendOrientationDiagnostic(diagnostic);
+    VCMReportOrientationDiagnostic(diagnostic);
 
     if (sampleAttachments) CFRelease(sampleAttachments);
 }
@@ -448,10 +481,12 @@ static _Atomic(uint32_t) g_vcmDeliveredDiagnosticCount = 0;
 static void VCMLogReplacementFrameContract(id object,
                                            CMSampleBufferRef sampleBuffer,
                                            CVPixelBufferRef pixelBuffer) {
-    uint32_t index = atomic_fetch_add_explicit(&g_vcmDeliveredDiagnosticCount, 1,
-                                               memory_order_relaxed);
-    if (index >= 24 || !sampleBuffer || !pixelBuffer) return;
+    if (!sampleBuffer || !pixelBuffer) return;
+    NSString *node = [NSString stringWithUTF8String:object_getClassName(object)] ?: @"unknown";
+    if (!VCMShouldEmitOrientationDiagnosticForKey([@"FRAME_DELIVERED/" stringByAppendingString:node])) return;
 
+    uint32_t index = atomic_fetch_add_explicit(&g_vcmDeliveredDiagnosticCount, 1,
+                                               memory_order_relaxed) + 1;
     CMFormatDescriptionRef format = CMSampleBufferGetFormatDescription(sampleBuffer);
     CMVideoDimensions dimensions = {0, 0};
     CFDictionaryRef formatExtensions = NULL;
@@ -472,24 +507,25 @@ static void VCMLogReplacementFrameContract(id object,
         ? (CFDictionaryRef)CFArrayGetValueAtIndex(perSample, 0) : NULL;
 
     NSString *diagnostic = [NSString stringWithFormat:
-        @"[VCam Pro/OrientationDiag] FRAME_DELIVERED timestamp=%.3f uptime=%.3f #%u node=%s pixel=%zux%zu rowBytes=%zu format=%dx%d pixelFormat=%u formatExtValues=%@ pixelPropValues=%@ pixelNoPropValues=%@ samplePropValues=%@ sampleEntryValues=%@",
+        @"[VCam Pro/LiveDiag] FRAME_DELIVERED timestamp=%.3f uptime=%.3f #%u node=%@ pixel=%zux%zu rowBytes=%zu format=%dx%d pixelFormat=%u pts=%.6f formatExt=%@ pixelProp=%@ pixelNoProp=%@ sampleProp=%@ sampleEntry=%@",
         [NSDate date].timeIntervalSince1970,
         NSProcessInfo.processInfo.systemUptime,
-        index + 1,
-        object_getClassName(object),
+        index,
+        node,
         CVPixelBufferGetWidth(pixelBuffer),
         CVPixelBufferGetHeight(pixelBuffer),
         CVPixelBufferGetBytesPerRow(pixelBuffer),
         dimensions.width,
         dimensions.height,
         (unsigned int)CVPixelBufferGetPixelFormatType(pixelBuffer),
+        CMTimeGetSeconds(CMSampleBufferGetPresentationTimeStamp(sampleBuffer)),
         VCMDescribeDictionaryEntries(formatExtensions),
         VCMDescribeDictionaryEntries(propagated),
         VCMDescribeDictionaryEntries(nonPropagated),
         VCMDescribeDictionaryEntries(sampleAttachments),
         VCMDescribeDictionaryEntries(perSampleDictionary)];
     NSLog(@"%@", diagnostic);
-    VCMSendOrientationDiagnostic(diagnostic);
+    VCMReportOrientationDiagnostic(diagnostic);
 
     if (sampleAttachments) CFRelease(sampleAttachments);
 }
