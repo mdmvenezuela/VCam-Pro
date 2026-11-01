@@ -55,6 +55,8 @@ static UIButton *g_floatButton = nil;
 @class VCamAdjustmentPanel;
 static VCamAdjustmentPanel *g_adjustmentPanel = nil;
 static NSInteger g_adjustmentPreviewRevision = -1;
+@class VCamLiveDiagnosticsPanel;
+static VCamLiveDiagnosticsPanel *g_liveDiagnosticsPanel = nil;
 static id g_pickerDelegate = nil;
 static NSMutableArray *g_lifecycleObservers = nil;
 static char g_darwinObserverToken;
@@ -1955,72 +1957,337 @@ static void VCamStartOrientationDiagnosticSampler(void) {
     dispatch_resume(g_orientationDiagnosticTimer);
 }
 
-static void VCamShowOrientationDiagnostics(void) {
-    NSString *directory = @"/var/mobile/Documents";
-    NSString *path = [directory stringByAppendingPathComponent:@"VCam-OrientationDiag.log"];
-    NSFileManager *fm = [NSFileManager defaultManager];
-    NSError *directoryError = nil;
-    [fm createDirectoryAtPath:directory withIntermediateDirectories:YES attributes:nil error:&directoryError];
+@interface VCamLiveDiagnosticsPanel : UIView
+@property (nonatomic, strong) UIView *headerView;
+@property (nonatomic, strong) UILabel *titleLabel;
+@property (nonatomic, strong) UILabel *statusLabel;
+@property (nonatomic, strong) UITextView *logView;
+@property (nonatomic, strong) UIButton *clearButton;
+@property (nonatomic, strong) UIButton *pauseButton;
+@property (nonatomic, strong) UIButton *closeButton;
+@property (nonatomic, strong) NSMutableString *logBuffer;
+@property (nonatomic, assign) NSUInteger lastEventID;
+@property (nonatomic, assign) BOOL paused;
+@property (nonatomic, assign) BOOL pollInFlight;
+@property (nonatomic, strong) dispatch_source_t pollTimer;
+- (void)startLiveStream;
+- (void)closePanel;
+@end
 
-    NSString *probe = [NSString stringWithFormat:@"\n[VCam Pro/OrientationDiag] PANEL_PROBE %@\n",
-                       [[NSDate date] description]];
-    NSData *probeData = [probe dataUsingEncoding:NSUTF8StringEncoding];
-    BOOL probeOK = NO;
-    NSError *writeError = nil;
-    if (![fm fileExistsAtPath:path]) [fm createFileAtPath:path contents:nil attributes:nil];
-    NSFileHandle *handle = [NSFileHandle fileHandleForWritingAtPath:path];
-    if (handle) {
-        @try {
-            [handle seekToEndOfFile];
-            [handle writeData:probeData];
-            [handle synchronizeFile];
-            probeOK = YES;
-            [handle closeFile];
-        } @catch (NSException *exception) {
-            writeError = [NSError errorWithDomain:@"VCamOrientationDiag"
-                                               code:2
-                                           userInfo:@{NSLocalizedDescriptionKey: exception.reason ?: @"Error escribiendo"}];
-            @try { [handle closeFile]; } @catch (__unused NSException *ignored) {}
+@implementation VCamLiveDiagnosticsPanel
+
+- (UIButton *)toolbarButton:(NSString *)title action:(SEL)action {
+    UIButton *button = [UIButton buttonWithType:UIButtonTypeSystem];
+    [button setTitle:title forState:UIControlStateNormal];
+    [button setTitleColor:[UIColor colorWithWhite:1.0 alpha:0.96]
+                 forState:UIControlStateNormal];
+    button.titleLabel.font = [UIFont systemFontOfSize:10 weight:UIFontWeightBold];
+    button.backgroundColor = [UIColor colorWithWhite:1.0 alpha:0.12];
+    button.layer.cornerRadius = 8.0;
+    button.layer.borderWidth = 1.0;
+    button.layer.borderColor = [UIColor colorWithWhite:1.0 alpha:0.10].CGColor;
+    [button addTarget:self action:action forControlEvents:UIControlEventTouchUpInside];
+    return button;
+}
+
+- (instancetype)initWithFrame:(CGRect)frame {
+    self = [super initWithFrame:frame];
+    if (!self) return nil;
+
+    self.backgroundColor = [UIColor colorWithRed:0.025 green:0.035 blue:0.055 alpha:0.97];
+    self.layer.cornerRadius = 15.0;
+    self.layer.borderWidth = 1.0;
+    self.layer.borderColor = [UIColor colorWithWhite:1.0 alpha:0.23].CGColor;
+    self.layer.shadowColor = UIColor.blackColor.CGColor;
+    self.layer.shadowOpacity = 0.42;
+    self.layer.shadowRadius = 18.0;
+    self.layer.shadowOffset = CGSizeMake(0, 7);
+    self.clipsToBounds = NO;
+    self.autoresizingMask = UIViewAutoresizingFlexibleWidth | UIViewAutoresizingFlexibleHeight;
+
+    _logBuffer = [NSMutableString string];
+
+    _headerView = [[UIView alloc] init];
+    _headerView.backgroundColor = [UIColor colorWithWhite:1.0 alpha:0.045];
+    _headerView.layer.cornerRadius = 14.0;
+    [self addSubview:_headerView];
+
+    _titleLabel = [[UILabel alloc] init];
+    _titleLabel.text = @"VCAM  /  ORIENTACIÓN EN VIVO";
+    _titleLabel.textColor = UIColor.whiteColor;
+    _titleLabel.font = [UIFont systemFontOfSize:11 weight:UIFontWeightHeavy];
+    _titleLabel.adjustsFontSizeToFitWidth = YES;
+    [_headerView addSubview:_titleLabel];
+
+    _statusLabel = [[UILabel alloc] init];
+    _statusLabel.text = @"INICIANDO FLUJO EN TIEMPO REAL…";
+    _statusLabel.textColor = [UIColor colorWithRed:0.36 green:0.91 blue:0.66 alpha:1.0];
+    _statusLabel.font = [UIFont monospacedDigitSystemFontOfSize:9 weight:UIFontWeightMedium];
+    _statusLabel.adjustsFontSizeToFitWidth = YES;
+    [_headerView addSubview:_statusLabel];
+
+    _clearButton = [self toolbarButton:@"LIMPIAR" action:@selector(clearTapped)];
+    _pauseButton = [self toolbarButton:@"PAUSA" action:@selector(pauseTapped)];
+    _closeButton = [self toolbarButton:@"×" action:@selector(closePanel)];
+    _closeButton.titleLabel.font = [UIFont systemFontOfSize:20 weight:UIFontWeightRegular];
+    [_headerView addSubview:_clearButton];
+    [_headerView addSubview:_pauseButton];
+    [_headerView addSubview:_closeButton];
+
+    UIPanGestureRecognizer *drag = [[UIPanGestureRecognizer alloc] initWithTarget:self
+                                                                            action:@selector(handlePanelDrag:)];
+    drag.maximumNumberOfTouches = 1;
+    drag.cancelsTouchesInView = NO;
+    [_headerView addGestureRecognizer:drag];
+
+    _logView = [[UITextView alloc] init];
+    _logView.editable = NO;
+    _logView.selectable = YES;
+    _logView.alwaysBounceVertical = YES;
+    _logView.backgroundColor = [UIColor colorWithWhite:0.0 alpha:0.55];
+    _logView.textColor = [UIColor colorWithRed:0.77 green:0.91 blue:0.84 alpha:1.0];
+    _logView.font = [UIFont monospacedSystemFontOfSize:9.5 weight:UIFontWeightRegular];
+    _logView.textContainerInset = UIEdgeInsetsMake(9, 8, 9, 8);
+    _logView.layer.cornerRadius = 9.0;
+    _logView.layer.borderWidth = 1.0;
+    _logView.layer.borderColor = [UIColor colorWithWhite:1.0 alpha:0.08].CGColor;
+    [self addSubview:_logView];
+
+    [self appendLine:@"CONSOLA EN VIVO LISTA."];
+    [self appendLine:@"Deja esta ventana abierta y entra en la app que muestra la imagen girada."];
+    [self appendLine:@"Busca FRAME_RECEIVED, FRAME_DELIVERED, RENDER y CLIENT_CONNECTION."];
+    return self;
+}
+
+- (void)layoutSubviews {
+    [super layoutSubviews];
+    CGFloat width = CGRectGetWidth(self.bounds);
+    CGFloat height = CGRectGetHeight(self.bounds);
+    self.headerView.frame = CGRectMake(0, 0, width, 57);
+    self.titleLabel.frame = CGRectMake(12, 5, MAX(120, width - 174), 21);
+    self.statusLabel.frame = CGRectMake(12, 29, MAX(120, width - 174), 17);
+    self.clearButton.frame = CGRectMake(width - 156, 13, 52, 30);
+    self.pauseButton.frame = CGRectMake(width - 98, 13, 52, 30);
+    self.closeButton.frame = CGRectMake(width - 40, 13, 32, 30);
+    self.logView.frame = CGRectMake(9, 64, width - 18, MAX(80, height - 73));
+}
+
+- (void)setLiveStatus:(NSString *)status connected:(BOOL)connected {
+    self.statusLabel.text = status ?: @"";
+    self.statusLabel.textColor = connected
+        ? [UIColor colorWithRed:0.36 green:0.91 blue:0.66 alpha:1.0]
+        : [UIColor colorWithRed:1.0 green:0.67 blue:0.38 alpha:1.0];
+}
+
+- (void)appendLine:(NSString *)line {
+    if (![line isKindOfClass:[NSString class]] || line.length == 0) return;
+    NSString *time = [NSDateFormatter localizedStringFromDate:[NSDate date]
+                                                     dateStyle:NSDateFormatterNoStyle
+                                                     timeStyle:NSDateFormatterMediumStyle];
+    [self.logBuffer appendFormat:@"[%@] %@\n", time, line];
+
+    const NSUInteger maximumCharacters = 70000;
+    if (self.logBuffer.length > maximumCharacters) {
+        NSUInteger trimTo = self.logBuffer.length - maximumCharacters;
+        NSRange newline = [self.logBuffer rangeOfString:@"\n"
+                                                options:0
+                                                  range:NSMakeRange(trimTo, self.logBuffer.length - trimTo)];
+        if (newline.location != NSNotFound) {
+            [self.logBuffer deleteCharactersInRange:NSMakeRange(0, NSMaxRange(newline))];
+        } else {
+            [self.logBuffer deleteCharactersInRange:NSMakeRange(0, trimTo)];
         }
-    } else {
-        writeError = directoryError ?: [NSError errorWithDomain:NSPOSIXErrorDomain
-                                                            code:errno
-                                                        userInfo:@{NSLocalizedDescriptionKey:
-                                                            [NSString stringWithFormat:@"No se pudo abrir el archivo (errno=%d)", errno]}];
     }
 
-    NSDictionary *attributes = [fm attributesOfItemAtPath:path error:nil];
-    unsigned long long fileSize = [attributes[NSFileSize] unsignedLongLongValue];
-    NSString *contents = [NSString stringWithContentsOfFile:path
-                                                   encoding:NSUTF8StringEncoding
-                                                      error:nil] ?: @"";
-    NSArray *lines = [contents componentsSeparatedByCharactersInSet:[NSCharacterSet newlineCharacterSet]];
-    NSUInteger start = lines.count > 14 ? lines.count - 14 : 0;
-    NSArray *lastLines = [lines subarrayWithRange:NSMakeRange(start, lines.count - start)];
-    NSString *tail = [[lastLines componentsJoinedByString:@"\n"] stringByTrimmingCharactersInSet:
-                      [NSCharacterSet whitespaceAndNewlineCharacterSet]];
-    if (tail.length > 2200) tail = [tail substringFromIndex:tail.length - 2200];
-
-    NSString *writeStatus = probeOK
-        ? @"ESCRITURA DEL PANEL: OK"
-        : [NSString stringWithFormat:@"ESCRITURA DEL PANEL: FALLÓ\n%@", writeError.localizedDescription ?: @"Error desconocido"];
-    NSString *message = [NSString stringWithFormat:
-        @"%@\nRuta: %@\nArchivo: %@\nTamaño: %llu bytes\n\nÚltimas líneas:\n%@",
-        writeStatus, path, [fm fileExistsAtPath:path] ? @"EXISTE" : @"NO EXISTE",
-        fileSize, tail.length ? tail : @"(sin contenido)"];
-
-    UIAlertController *alert = [UIAlertController alertControllerWithTitle:@"Diagnóstico de orientación"
-                                                                   message:message
-                                                            preferredStyle:UIAlertControllerStyleAlert];
-    [alert addAction:[UIAlertAction actionWithTitle:@"Copiar diagnóstico"
-                                              style:UIAlertActionStyleDefault
-                                            handler:^(__unused UIAlertAction *action) {
-        UIPasteboard.generalPasteboard.string = message;
-    }]];
-    [alert addAction:[UIAlertAction actionWithTitle:@"Cerrar" style:UIAlertActionStyleCancel handler:nil]];
-    if (g_overlayController && !g_overlayController.presentedViewController) {
-        [g_overlayController presentViewController:alert animated:YES completion:nil];
+    self.logView.text = self.logBuffer;
+    if (self.logView.text.length > 0) {
+        NSRange end = NSMakeRange(self.logView.text.length - 1, 1);
+        [self.logView scrollRangeToVisible:end];
     }
+}
+
+- (void)appendEventDictionaries:(NSArray *)events {
+    for (id item in events) {
+        if (![item isKindOfClass:[NSDictionary class]]) continue;
+        NSDictionary *event = (NSDictionary *)item;
+        NSUInteger eventID = [event[@"id"] unsignedIntegerValue];
+        NSString *line = [event[@"line"] isKindOfClass:[NSString class]] ? event[@"line"] : nil;
+        if (eventID > self.lastEventID) self.lastEventID = eventID;
+        if (line.length > 0) [self appendLine:line];
+    }
+}
+
+- (void)startLiveStream {
+    self.paused = NO;
+    [self setLiveStatus:@"CONECTANDO CON MEDIASERVERD / SPRINGBOARD…" connected:YES];
+    __weak typeof(self) weakSelf = self;
+    dispatch_async(dispatch_get_global_queue(QOS_CLASS_USER_INITIATED, 0), ^{
+        NSData *data = VCamHTTPGet(@"/orientation-diagnostics?clear=1");
+        NSDictionary *payload = nil;
+        if (data.length > 0) {
+            id object = [NSJSONSerialization JSONObjectWithData:data options:0 error:nil];
+            if ([object isKindOfClass:[NSDictionary class]]) payload = object;
+        }
+        dispatch_async(dispatch_get_main_queue(), ^{
+            __strong typeof(weakSelf) strongSelf = weakSelf;
+            if (!strongSelf || !strongSelf.superview) return;
+            if (payload) {
+                strongSelf.lastEventID = 0;
+                [strongSelf appendEventDictionaries:payload[@"events"]];
+                [strongSelf setLiveStatus:@"EN VIVO · ESPERANDO FRAMES DE CÁMARA" connected:YES];
+                [strongSelf startPollingTimer];
+            } else {
+                [strongSelf setLiveStatus:@"SIN CONEXIÓN CON SPRINGBOARD · REINTENTANDO" connected:NO];
+                [strongSelf startPollingTimer];
+            }
+        });
+    });
+}
+
+- (void)startPollingTimer {
+    if (self.pollTimer) return;
+    self.pollTimer = dispatch_source_create(DISPATCH_SOURCE_TYPE_TIMER, 0, 0,
+                                             dispatch_get_main_queue());
+    dispatch_source_set_timer(self.pollTimer,
+                              dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.25 * NSEC_PER_SEC)),
+                              (uint64_t)(0.25 * NSEC_PER_SEC),
+                              (uint64_t)(0.05 * NSEC_PER_SEC));
+    __weak typeof(self) weakSelf = self;
+    dispatch_source_set_event_handler(self.pollTimer, ^{
+        __strong typeof(weakSelf) strongSelf = weakSelf;
+        [strongSelf pollLiveEvents];
+    });
+    dispatch_resume(self.pollTimer);
+}
+
+- (void)pollLiveEvents {
+    if (self.paused || self.pollInFlight || !self.superview) return;
+    self.pollInFlight = YES;
+    NSUInteger afterID = self.lastEventID;
+    NSString *path = [NSString stringWithFormat:@"/orientation-diagnostics?after=%lu",
+                      (unsigned long)afterID];
+    __weak typeof(self) weakSelf = self;
+    dispatch_async(dispatch_get_global_queue(QOS_CLASS_UTILITY, 0), ^{
+        NSData *data = VCamHTTPGet(path);
+        NSDictionary *payload = nil;
+        if (data.length > 0) {
+            id object = [NSJSONSerialization JSONObjectWithData:data options:0 error:nil];
+            if ([object isKindOfClass:[NSDictionary class]]) payload = object;
+        }
+        dispatch_async(dispatch_get_main_queue(), ^{
+            __strong typeof(weakSelf) strongSelf = weakSelf;
+            if (!strongSelf) return;
+            strongSelf.pollInFlight = NO;
+            if (!payload) {
+                [strongSelf setLiveStatus:@"IPC SIN RESPUESTA · REINTENTANDO" connected:NO];
+                return;
+            }
+
+            NSUInteger oldestID = [payload[@"oldestId"] unsignedIntegerValue];
+            if (strongSelf.lastEventID > 0 && oldestID > strongSelf.lastEventID + 1) {
+                [strongSelf appendLine:[NSString stringWithFormat:
+                    @"AVISO: se descartaron eventos antiguos; el búfer conserva desde el ID %lu.",
+                    (unsigned long)oldestID]];
+            }
+            [strongSelf appendEventDictionaries:payload[@"events"]];
+            [strongSelf setLiveStatus:
+                [NSString stringWithFormat:@"EN VIVO · ÚLTIMO EVENTO #%lu",
+                 (unsigned long)strongSelf.lastEventID]
+                                  connected:YES];
+        });
+    });
+}
+
+- (void)clearTapped {
+    self.logBuffer = [NSMutableString string];
+    self.logView.text = @"";
+    self.lastEventID = 0;
+    self.paused = NO;
+    [self.pauseButton setTitle:@"PAUSA" forState:UIControlStateNormal];
+    [self setLiveStatus:@"LIMPIANDO SESIÓN…" connected:YES];
+    __weak typeof(self) weakSelf = self;
+    dispatch_async(dispatch_get_global_queue(QOS_CLASS_USER_INITIATED, 0), ^{
+        NSData *data = VCamHTTPGet(@"/orientation-diagnostics?clear=1");
+        NSDictionary *payload = nil;
+        if (data.length > 0) {
+            id object = [NSJSONSerialization JSONObjectWithData:data options:0 error:nil];
+            if ([object isKindOfClass:[NSDictionary class]]) payload = object;
+        }
+        dispatch_async(dispatch_get_main_queue(), ^{
+            __strong typeof(weakSelf) strongSelf = weakSelf;
+            if (!strongSelf) return;
+            if (payload) {
+                [strongSelf appendEventDictionaries:payload[@"events"]];
+                [strongSelf setLiveStatus:@"SESIÓN LIMPIA · EN VIVO" connected:YES];
+            } else {
+                [strongSelf setLiveStatus:@"NO SE PUDO LIMPIAR IPC" connected:NO];
+            }
+        });
+    });
+}
+
+- (void)pauseTapped {
+    self.paused = !self.paused;
+    [self.pauseButton setTitle:(self.paused ? @"SEGUIR" : @"PAUSA")
+                      forState:UIControlStateNormal];
+    [self setLiveStatus:(self.paused ? @"PAUSADO · LOS EVENTOS SIGUEN EN MEMORIA" : @"EN VIVO")
+                 connected:!self.paused];
+    if (!self.paused) [self pollLiveEvents];
+}
+
+- (void)handlePanelDrag:(UIPanGestureRecognizer *)gesture {
+    UIView *container = self.superview;
+    if (!container) return;
+    CGPoint translation = [gesture translationInView:container];
+    self.center = CGPointMake(self.center.x + translation.x, self.center.y + translation.y);
+    [gesture setTranslation:CGPointZero inView:container];
+
+    if (gesture.state == UIGestureRecognizerStateEnded ||
+        gesture.state == UIGestureRecognizerStateCancelled) {
+        CGFloat halfW = CGRectGetWidth(self.bounds) * 0.5;
+        CGFloat halfH = CGRectGetHeight(self.bounds) * 0.5;
+        self.center = CGPointMake(
+            MAX(halfW, MIN(CGRectGetWidth(container.bounds) - halfW, self.center.x)),
+            MAX(halfH + 20, MIN(CGRectGetHeight(container.bounds) - halfH, self.center.y)));
+    }
+}
+
+- (void)closePanel {
+    if (self.pollTimer) {
+        dispatch_source_cancel(self.pollTimer);
+        self.pollTimer = nil;
+    }
+    self.pollInFlight = NO;
+    [self removeFromSuperview];
+    if (g_overlayWindow && [g_overlayWindow isKindOfClass:[VCamPassthroughWindow class]]) {
+        ((VCamPassthroughWindow *)g_overlayWindow).interactivePanel = nil;
+    }
+    if (g_liveDiagnosticsPanel == self) g_liveDiagnosticsPanel = nil;
+}
+
+@end
+
+static void VCamShowOrientationDiagnostics(void) {
+    if (!g_isSpringBoardProcess || !g_overlayController || !g_overlayWindow) return;
+    if (g_liveDiagnosticsPanel && g_liveDiagnosticsPanel.superview) {
+        [g_overlayController.view bringSubviewToFront:g_liveDiagnosticsPanel];
+        return;
+    }
+
+    CGRect bounds = g_overlayController.view.bounds;
+    CGFloat width = MIN(500.0, MAX(260.0, CGRectGetWidth(bounds) - 20.0));
+    CGFloat height = MIN(560.0, MAX(220.0, CGRectGetHeight(bounds) - 115.0));
+    CGFloat x = (CGRectGetWidth(bounds) - width) * 0.5;
+    CGFloat y = MAX(52.0, MIN(94.0, CGRectGetHeight(bounds) * 0.10));
+    VCamLiveDiagnosticsPanel *panel =
+        [[VCamLiveDiagnosticsPanel alloc] initWithFrame:CGRectMake(x, y, width, height)];
+    g_liveDiagnosticsPanel = panel;
+    [g_overlayController.view addSubview:panel];
+    [g_overlayController.view bringSubviewToFront:panel];
+    if ([g_overlayWindow isKindOfClass:[VCamPassthroughWindow class]]) {
+        ((VCamPassthroughWindow *)g_overlayWindow).interactivePanel = panel;
+    }
+    [panel startLiveStream];
 }
 
 static void VCamShowMenu(void) {
@@ -2067,12 +2334,16 @@ static void VCamShowMenu(void) {
         });
     }]];
 
-    [menu addAction:[UIAlertAction actionWithTitle:@"Diagnóstico de orientación"
+    NSString *liveDiagnosticsTitle = g_liveDiagnosticsPanel
+        ? @"Cerrar consola de orientación en vivo"
+        : @"Consola de orientación en vivo";
+    [menu addAction:[UIAlertAction actionWithTitle:liveDiagnosticsTitle
                                              style:UIAlertActionStyleDefault
-                                           handler:^(UIAlertAction *action) {
+                                           handler:^(__unused UIAlertAction *action) {
         dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.2 * NSEC_PER_SEC)),
                        dispatch_get_main_queue(), ^{
-            VCamShowOrientationDiagnostics();
+            if (g_liveDiagnosticsPanel) [g_liveDiagnosticsPanel closePanel];
+            else VCamShowOrientationDiagnostics();
         });
     }]];
 
