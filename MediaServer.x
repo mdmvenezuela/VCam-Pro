@@ -215,6 +215,59 @@ void VCMReportEngineStatus(NSString *status, NSString *detail) {
 static CFStringRef const kVCMSystemReplacementAttachment =
     CFSTR("com.vcam.pro.systemreplacement.v1");
 
+static NSCondition *g_vcmSampleReplacementCondition;
+static NSMutableSet<NSNumber *> *g_vcmSamplesBeingReplaced;
+static dispatch_once_t g_vcmSampleReplacementOnce;
+
+static void VCMInitializeSampleReplacementGate(void) {
+    dispatch_once(&g_vcmSampleReplacementOnce, ^{
+        g_vcmSampleReplacementCondition = [[NSCondition alloc] init];
+        g_vcmSamplesBeingReplaced = [[NSMutableSet alloc] init];
+    });
+}
+
+// Returns NO when the exact CMSampleBuffer was already replaced by another
+// BWNodeOutput. Calls for that same sample wait until the first render finishes;
+// unrelated sample buffers are not serialized behind Core Image rendering.
+static BOOL VCMBeginSampleReplacement(CMSampleBufferRef sampleBuffer) {
+    if (!sampleBuffer) return NO;
+    VCMInitializeSampleReplacementGate();
+
+    NSNumber *key = @((uintptr_t)sampleBuffer);
+    [g_vcmSampleReplacementCondition lock];
+    while ([g_vcmSamplesBeingReplaced containsObject:key]) {
+        [g_vcmSampleReplacementCondition wait];
+    }
+
+    BOOL alreadyReplaced =
+        CMGetAttachment(sampleBuffer, kVCMSystemReplacementAttachment, NULL) ==
+        kCFBooleanTrue;
+    if (!alreadyReplaced) {
+        [g_vcmSamplesBeingReplaced addObject:key];
+    }
+    [g_vcmSampleReplacementCondition unlock];
+    return !alreadyReplaced;
+}
+
+static void VCMFinishSampleReplacement(CMSampleBufferRef sampleBuffer,
+                                       BOOL replacementSucceeded) {
+    if (!sampleBuffer) return;
+    VCMInitializeSampleReplacementGate();
+
+    NSNumber *key = @((uintptr_t)sampleBuffer);
+    [g_vcmSampleReplacementCondition lock];
+    if (replacementSucceeded) {
+        // The marker belongs to the sample, never to a reusable camera buffer.
+        CMSetAttachment(sampleBuffer,
+                        kVCMSystemReplacementAttachment,
+                        kCFBooleanTrue,
+                        kCMAttachmentMode_ShouldPropagate);
+    }
+    [g_vcmSamplesBeingReplaced removeObject:key];
+    [g_vcmSampleReplacementCondition broadcast];
+    [g_vcmSampleReplacementCondition unlock];
+}
+
 static Method VCMDirectInstanceMethod(Class runtimeClass, SEL selector) {
     if (!runtimeClass || !selector) return NULL;
     unsigned int count = 0;
@@ -309,36 +362,22 @@ static void VCMEmitSampleBuffer(id object,
             return;
         }
 
-        BOOL alreadyReplaced = NO;
         BOOL replacementSucceeded = NO;
+        BOOL shouldReplace = VCMBeginSampleReplacement(sampleBuffer);
 
-        // Serialize only callers holding this exact CMSampleBuffer. Other
-        // camera frames can continue rendering concurrently.
-        @synchronized ((__bridge id)sampleBuffer) {
-            alreadyReplaced =
-                CMGetAttachment(sampleBuffer, kVCMSystemReplacementAttachment, NULL) ==
-                kCFBooleanTrue;
+        if (shouldReplace) {
+            VCMLogCameraFrameContract(object, sampleBuffer,
+                                      (CVPixelBufferRef)inputImageBuffer);
 
-            if (!alreadyReplaced) {
-                VCMLogCameraFrameContract(object, sampleBuffer,
-                                          (CVPixelBufferRef)inputImageBuffer);
+            replacementSucceeded =
+                [source renderReplacementIntoPixelBuffer:(CVPixelBufferRef)inputImageBuffer];
 
-                replacementSucceeded =
-                    [source renderReplacementIntoPixelBuffer:(CVPixelBufferRef)inputImageBuffer];
-
-                if (replacementSucceeded) {
-                    // Mark the sample, not its reusable CVPixelBuffer. This
-                    // prevents duplicate work without leaving a stale marker
-                    // on a camera-pool buffer recycled for a later frame.
-                    CMSetAttachment(sampleBuffer,
-                                    kVCMSystemReplacementAttachment,
-                                    kCFBooleanTrue,
-                                    kCMAttachmentMode_ShouldPropagate);
-                }
-            }
+            // Always release the gate, including render failures, so another
+            // output node cannot remain blocked on this frame.
+            VCMFinishSampleReplacement(sampleBuffer, replacementSucceeded);
         }
 
-        if (!alreadyReplaced && !replacementSucceeded) {
+        if (shouldReplace && !replacementSucceeded) {
             uint32_t attempts = atomic_fetch_add_explicit(&g_vcmUnreplacedCount,
                                                           1,
                                                           memory_order_relaxed) + 1;
