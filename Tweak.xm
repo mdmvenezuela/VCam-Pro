@@ -965,10 +965,6 @@ static void VCamLogClientConnectionOrientation(AVCaptureOutput *output,
 %end
 
 // Observe the orientation contract requested by each app without changing it.
-@interface AVCaptureConnection (VCamRuntimeRotationAngle)
-- (void)setVideoRotationAngle:(CGFloat)angle;
-@end
-
 %hook AVCaptureConnection
 
 - (void)setVideoOrientation:(AVCaptureVideoOrientation)orientation {
@@ -987,25 +983,6 @@ static void VCamLogClientConnectionOrientation(AVCaptureOutput *output,
         object_getClassName(self),
         (long)orientation,
         (long)actual];
-    VCamSendOrientationDiagnosticEvent(event);
-}
-
-- (void)setVideoRotationAngle:(CGFloat)angle {
-    %orig(angle);
-
-    CGFloat actual = angle;
-    SEL getter = sel_registerName("videoRotationAngle");
-    if ([self respondsToSelector:getter]) {
-        actual = ((CGFloat (*)(id, SEL))objc_msgSend)(self, getter);
-    }
-    NSString *event = [NSString stringWithFormat:
-        @"[VCam Pro/LiveDiag] CONNECTION_SET_VIDEO_ROTATION_ANGLE timestamp=%.3f app=%@ process=%@ connection=%s requested=%.1f actual=%.1f",
-        [NSDate date].timeIntervalSince1970,
-        NSBundle.mainBundle.bundleIdentifier ?: @"unknown.bundle",
-        NSProcessInfo.processInfo.processName ?: @"unknown-process",
-        object_getClassName(self),
-        angle,
-        actual];
     VCamSendOrientationDiagnosticEvent(event);
 }
 
