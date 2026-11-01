@@ -10,6 +10,7 @@ FOUNDATION_EXPORT void VCMReportEngineStatus(NSString *status, NSString *detail)
 - (void)startMonitoring;
 - (BOOL)isReplacementEnabled;
 - (nullable CVPixelBufferRef)copyReplacementPixelBufferMatching:(CVPixelBufferRef)templateBuffer CF_RETURNS_RETAINED;
+- (BOOL)renderReplacementIntoPixelBuffer:(CVPixelBufferRef)targetBuffer;
 @end
 
 NS_ASSUME_NONNULL_END
