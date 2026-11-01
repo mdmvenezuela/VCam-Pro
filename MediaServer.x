@@ -287,13 +287,6 @@ static void VCMEmitSampleBuffer(id object,
             return;
         }
 
-        // Fast path: a fan-out node may receive the very same sample again.
-        if (CMGetAttachment(sampleBuffer, kVCMSystemReplacementAttachment, NULL) ==
-            kCFBooleanTrue) {
-            original(object, selector, sampleBuffer);
-            return;
-        }
-
         CVImageBufferRef inputImageBuffer = CMSampleBufferGetImageBuffer(sampleBuffer);
         if (!inputImageBuffer) {
             original(object, selector, sampleBuffer);
