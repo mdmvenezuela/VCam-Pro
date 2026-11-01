@@ -58,6 +58,8 @@ static BOOL VCamSendAll(int socketFD, const void *bytes, size_t length) {
     NSString *_engineDetail;
     NSString *_engineOrientationDiagnostic;
     NSString *_diagnosticOrientationContext;
+    NSMutableArray<NSDictionary *> *_orientationDiagnosticEvents;
+    NSUInteger _orientationDiagnosticSequence;
     NSUInteger _engineHooks;
     NSUInteger _engineFrames;
     NSTimeInterval _engineLastSeen;
@@ -71,6 +73,7 @@ static BOOL VCamSendAll(int socketFD, const void *bytes, size_t length) {
 - (BOOL)preparePrivateDirectory:(NSError **)error;
 - (void)handleClient:(int)clientFD;
 - (void)applyControlDictionary:(NSDictionary *)control;
+- (void)appendLiveOrientationDiagnostic:(NSString *)line;
 
 @end
 
@@ -101,6 +104,8 @@ static BOOL VCamSendAll(int socketFD, const void *bytes, size_t length) {
         _engineDetail = @"Esperando confirmación de mediaserverd.";
         _engineOrientationDiagnostic = @"Sin fotogramas de diagnóstico recibidos.";
         _diagnosticOrientationContext = @"UIKit orientation context not received yet";
+        _orientationDiagnosticEvents = [NSMutableArray array];
+        _orientationDiagnosticSequence = 0;
         _engineHooks = 0;
         _engineFrames = 0;
         _engineLastSeen = 0;
@@ -301,36 +306,27 @@ static BOOL VCamSendAll(int socketFD, const void *bytes, size_t length) {
     [_stateLock unlock];
 }
 
-- (void)appendDiagnosticOrientationEvent:(NSString *)event {
-    if (![event isKindOfClass:[NSString class]] || event.length == 0) return;
-    NSString *safeEvent = event.length > 3000 ? [event substringToIndex:3000] : [event copy];
-    NSString *directory = @"/var/mobile/Documents";
-    NSString *path = [directory stringByAppendingPathComponent:@"VCam-OrientationDiag.log"];
-    NSFileManager *fileManager = [NSFileManager defaultManager];
-    [fileManager createDirectoryAtPath:directory
-           withIntermediateDirectories:YES
-                            attributes:nil
-                                 error:nil];
-    @synchronized ([VCamSharedState class]) {
-        if (![fileManager fileExistsAtPath:path]) {
-            [fileManager createFileAtPath:path contents:nil attributes:nil];
-        }
-        NSFileHandle *handle = [NSFileHandle fileHandleForWritingAtPath:path];
-        if (!handle) {
-            NSLog(@"[VCam Pro/OrientationDiag] No se pudo abrir el registro de eventos de orientación.");
-            return;
-        }
-        @try {
-            [handle seekToEndOfFile];
-            NSData *lineData = [[safeEvent stringByAppendingString:@"\n"] dataUsingEncoding:NSUTF8StringEncoding];
-            [handle writeData:lineData];
-            [handle synchronizeFile];
-            [handle closeFile];
-        } @catch (NSException *exception) {
-            @try { [handle closeFile]; } @catch (__unused NSException *ignored) {}
-            NSLog(@"[VCam Pro/OrientationDiag] Error guardando evento: %@", exception.reason);
-        }
+- (void)appendLiveOrientationDiagnostic:(NSString *)line {
+    if (![line isKindOfClass:[NSString class]] || line.length == 0) return;
+    NSString *safeLine = line.length > 6000 ? [line substringToIndex:6000] : [line copy];
+
+    [_stateLock lock];
+    NSUInteger eventID = ++_orientationDiagnosticSequence;
+    NSDictionary *event = @{
+        @"id": @(eventID),
+        @"timestamp": @([NSDate date].timeIntervalSince1970),
+        @"line": safeLine
+    };
+    [_orientationDiagnosticEvents addObject:event];
+    while (_orientationDiagnosticEvents.count > 300) {
+        [_orientationDiagnosticEvents removeObjectAtIndex:0];
     }
+    _engineOrientationDiagnostic = safeLine;
+    [_stateLock unlock];
+}
+
+- (void)appendDiagnosticOrientationEvent:(NSString *)event {
+    [self appendLiveOrientationDiagnostic:event];
 }
 
 - (void)publishChange {
@@ -796,45 +792,78 @@ static BOOL VCamSendAll(int socketFD, const void *bytes, size_t length) {
         [_stateLock lock];
         NSString *orientationContext = [_diagnosticOrientationContext copy] ?: @"UIKit orientation context unavailable";
         [_stateLock unlock];
-        NSString *completeLine = [NSString stringWithFormat:@"%@ | SPRINGBOARD_CONTEXT={%@}", line, orientationContext];
-        NSString *directory = @"/var/mobile/Documents";
-        NSString *path = [directory stringByAppendingPathComponent:@"VCam-OrientationDiag.log"];
-        NSError *writeError = nil;
-        [[NSFileManager defaultManager] createDirectoryAtPath:directory
-                                  withIntermediateDirectories:YES
-                                                   attributes:nil
-                                                        error:&writeError];
-        NSFileHandle *handle = [NSFileHandle fileHandleForWritingAtPath:path];
-        if (!handle) {
-            [[NSFileManager defaultManager] createFileAtPath:path contents:nil attributes:nil];
-            handle = [NSFileHandle fileHandleForWritingAtPath:path];
-        }
-        BOOL saved = NO;
-        if (handle) {
-            @try {
-                [handle seekToEndOfFile];
-                NSData *lineData = [[completeLine stringByAppendingString:@"\n"] dataUsingEncoding:NSUTF8StringEncoding];
-                [handle writeData:lineData];
-                [handle synchronizeFile];
-                saved = YES;
-                [handle closeFile];
-            } @catch (NSException *exception) {
-                @try { [handle closeFile]; } @catch (__unused NSException *ignored) {}
-                NSLog(@"[VCam Pro/OrientationDiag] Error guardando diagnóstico: %@", exception.reason);
-            }
-        }
-        if (!saved) {
-            NSLog(@"[VCam Pro/OrientationDiag] SpringBoard no pudo guardar el diagnóstico: %@",
-                  writeError.localizedDescription ?: @"error de archivo");
-            return;
-        }
+        NSString *completeLine = [NSString stringWithFormat:@"%@ | SPRINGBOARD_CONTEXT={%@}",
+                                  line, orientationContext];
+        [self appendLiveOrientationDiagnostic:completeLine];
 
         NSData *responseBody = [@"{\"ok\":true}" dataUsingEncoding:NSUTF8StringEncoding];
         NSString *responseHeader = [NSString stringWithFormat:
-            @"HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: %lu\r\nConnection: close\r\n\r\n",
+            @"HTTP/1.1 200 OK\\r\\nContent-Type: application/json\\r\\nContent-Length: %lu\\r\\nConnection: close\\r\\n\\r\\n",
             (unsigned long)responseBody.length];
         VCamSendAll(clientFD, responseHeader.UTF8String, responseHeader.length);
         VCamSendAll(clientFD, responseBody.bytes, responseBody.length);
+        return;
+    }
+
+    if (isGET && [requestPath hasPrefix:@"/orientation-diagnostics"]) {
+        NSURLComponents *components = [NSURLComponents componentsWithString:
+            [@"http://127.0.0.1" stringByAppendingString:requestPath]];
+        BOOL clear = NO;
+        NSUInteger afterID = 0;
+        for (NSURLQueryItem *item in components.queryItems) {
+            if ([item.name isEqualToString:@"clear"]) clear = [item.value boolValue];
+            else if ([item.name isEqualToString:@"after"]) afterID = (NSUInteger)MAX(0, item.value.longLongValue);
+        }
+
+        if (clear) {
+            [_stateLock lock];
+            [_orientationDiagnosticEvents removeAllObjects];
+            NSString *sessionLine = [NSString stringWithFormat:
+                @"[VCam Pro/LiveDiag] SESSION_STARTED timestamp=%.3f uptime=%.3f",
+                [NSDate date].timeIntervalSince1970,
+                NSProcessInfo.processInfo.systemUptime];
+            NSUInteger eventID = ++_orientationDiagnosticSequence;
+            [_orientationDiagnosticEvents addObject:@{
+                @"id": @(eventID),
+                @"timestamp": @([NSDate date].timeIntervalSince1970),
+                @"line": sessionLine
+            }];
+            _engineOrientationDiagnostic = sessionLine;
+            [_stateLock unlock];
+            afterID = 0;
+        }
+
+        [_stateLock lock];
+        NSArray<NSDictionary *> *snapshot = [_orientationDiagnosticEvents copy];
+        NSUInteger latestID = _orientationDiagnosticSequence;
+        NSUInteger oldestID = snapshot.count ? [snapshot.firstObject[@"id"] unsignedIntegerValue] : latestID;
+        [_stateLock unlock];
+
+        NSMutableArray *events = [NSMutableArray array];
+        for (NSDictionary *event in snapshot) {
+            NSUInteger eventID = [event[@"id"] unsignedIntegerValue];
+            if (afterID == 0 || eventID > afterID) [events addObject:event];
+        }
+        // Initial reads are bounded so a long-running mediaserverd cannot dump
+        // an unbounded history into the floating console.
+        if (afterID == 0 && events.count > 120) {
+            [events removeObjectsInRange:NSMakeRange(0, events.count - 120)];
+        }
+
+        NSDictionary *payload = @{
+            @"events": events,
+            @"latestId": @(latestID),
+            @"oldestId": @(oldestID),
+            @"serverTime": @([NSDate date].timeIntervalSince1970)
+        };
+        NSData *body = [NSJSONSerialization dataWithJSONObject:payload options:0 error:nil];
+        if (!body) body = [@"{}" dataUsingEncoding:NSUTF8StringEncoding];
+        NSString *responseHeader = [NSString stringWithFormat:
+            @"HTTP/1.1 200 OK\\r\\nContent-Type: application/json\\r\\nCache-Control: no-store\\r\\nContent-Length: %lu\\r\\nConnection: close\\r\\n\\r\\n",
+            (unsigned long)body.length];
+        if (VCamSendAll(clientFD, responseHeader.UTF8String, responseHeader.length)) {
+            VCamSendAll(clientFD, body.bytes, body.length);
+        }
         return;
     }
 
