@@ -134,8 +134,11 @@ static void VCMLogCameraFrameContract(id object, CMSampleBufferRef sampleBuffer,
     CFDictionaryRef perSampleDictionary = perSample && CFArrayGetCount(perSample) > 0
         ? (CFDictionaryRef)CFArrayGetValueAtIndex(perSample, 0) : NULL;
 
+    NSDate *receivedAt = [NSDate date];
     NSString *diagnostic = [NSString stringWithFormat:
-        @"[VCam Pro/OrientationDiag] #%u node=%s pixel=%zux%zu rowBytes=%zu format=%dx%d pixelFormat=%u formatExtValues=%@ pixelPropValues=%@ pixelNoPropValues=%@ samplePropValues=%@ sampleEntryValues=%@",
+        @"[VCam Pro/OrientationDiag] FRAME_RECEIVED timestamp=%.3f uptime=%.3f #%u node=%s pixel=%zux%zu rowBytes=%zu format=%dx%d pixelFormat=%u formatExtValues=%@ pixelPropValues=%@ pixelNoPropValues=%@ samplePropValues=%@ sampleEntryValues=%@",
+        receivedAt.timeIntervalSince1970,
+        NSProcessInfo.processInfo.systemUptime,
         index + 1,
         object_getClassName(object),
         CVPixelBufferGetWidth(pixelBuffer),
