@@ -1653,13 +1653,16 @@ static void VCamShowEngineDiagnostics(void) {
                 ? state[@"engineDetail"] : @"No se recibió respuesta del servidor de estado.";
             NSUInteger hooks = [state[@"engineHooks"] unsignedIntegerValue];
             NSUInteger frames = [state[@"engineFrames"] unsignedIntegerValue];
+            NSString *orientation = [state[@"engineOrientationDiagnostic"] isKindOfClass:[NSString class]]
+                ? state[@"engineOrientationDiagnostic"] : @"El motor aún no ha enviado datos de orientación.";
 
             NSString *message = state
-                ? [NSString stringWithFormat:@"%@\n\nDetalle: %@\nHooks instalados: %lu\nFotogramas sustituidos: %lu",
+                ? [NSString stringWithFormat:@"%@\n\nDetalle: %@\nHooks instalados: %lu\nFotogramas sustituidos: %lu\n\nÚLTIMO FOTOGRAMA / ORIENTACIÓN:\n%@",
                    VCamEngineStatusExplanation(status),
                    detail,
                    (unsigned long)hooks,
-                   (unsigned long)frames]
+                   (unsigned long)frames,
+                   orientation]
                 : @"No se pudo consultar el estado compartido de VCam. El servidor de SpringBoard no respondió.";
 
             UIAlertController *alert = [UIAlertController alertControllerWithTitle:@"Diagnóstico de VCam"
