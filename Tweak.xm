@@ -1680,7 +1680,7 @@ static void VCamShowOrientationDiagnostics(void) {
     NSError *directoryError = nil;
     [fm createDirectoryAtPath:directory withIntermediateDirectories:YES attributes:nil error:&directoryError];
 
-    NSString *probe = [NSString stringWithFormat:@"\\n[VCam Pro/OrientationDiag] PANEL_PROBE %@\\n",
+    NSString *probe = [NSString stringWithFormat:@"\n[VCam Pro/OrientationDiag] PANEL_PROBE %@\n",
                        [[NSDate date] description]];
     NSData *probeData = [probe dataUsingEncoding:NSUTF8StringEncoding];
     BOOL probeOK = NO;
@@ -1715,15 +1715,15 @@ static void VCamShowOrientationDiagnostics(void) {
     NSArray *lines = [contents componentsSeparatedByCharactersInSet:[NSCharacterSet newlineCharacterSet]];
     NSUInteger start = lines.count > 14 ? lines.count - 14 : 0;
     NSArray *lastLines = [lines subarrayWithRange:NSMakeRange(start, lines.count - start)];
-    NSString *tail = [[lastLines componentsJoinedByString:@"\\n"] stringByTrimmingCharactersInSet:
+    NSString *tail = [[lastLines componentsJoinedByString:@"\n"] stringByTrimmingCharactersInSet:
                       [NSCharacterSet whitespaceAndNewlineCharacterSet]];
     if (tail.length > 2200) tail = [tail substringFromIndex:tail.length - 2200];
 
     NSString *writeStatus = probeOK
         ? @"ESCRITURA DEL PANEL: OK"
-        : [NSString stringWithFormat:@"ESCRITURA DEL PANEL: FALLÓ\\n%@", writeError.localizedDescription ?: @"Error desconocido"];
+        : [NSString stringWithFormat:@"ESCRITURA DEL PANEL: FALLÓ\n%@", writeError.localizedDescription ?: @"Error desconocido"];
     NSString *message = [NSString stringWithFormat:
-        @"%@\\nRuta: %@\\nArchivo: %@\\nTamaño: %llu bytes\\n\\nÚltimas líneas:\\n%@",
+        @"%@\nRuta: %@\nArchivo: %@\nTamaño: %llu bytes\n\nÚltimas líneas:\n%@",
         writeStatus, path, [fm fileExistsAtPath:path] ? @"EXISTE" : @"NO EXISTE",
         fileSize, tail.length ? tail : @"(sin contenido)"];
 
