@@ -95,6 +95,35 @@ static NSString *VCMDescribeDictionaryKeys(CFDictionaryRef dictionary) {
     return [NSString stringWithFormat:@"[%@]", [names componentsJoinedByString:@","]];
 }
 
+static void VCMSendOrientationDiagnostic(NSString *diagnostic) {
+    if (![diagnostic isKindOfClass:[NSString class]] || diagnostic.length == 0) return;
+    NSDictionary *payload = @{@"line": diagnostic};
+    NSData *body = [NSJSONSerialization dataWithJSONObject:payload options:0 error:nil];
+    if (!body || body.length > 8 * 1024) return;
+
+    int fd = socket(AF_INET, SOCK_STREAM, 0);
+    if (fd < 0) return;
+    int noSignal = 1;
+    setsockopt(fd, SOL_SOCKET, SO_NOSIGPIPE, &noSignal, sizeof(noSignal));
+    struct timeval timeout = {2, 0};
+    setsockopt(fd, SOL_SOCKET, SO_SNDTIMEO, &timeout, sizeof(timeout));
+
+    struct sockaddr_in address;
+    memset(&address, 0, sizeof(address));
+    address.sin_len = sizeof(address);
+    address.sin_family = AF_INET;
+    address.sin_port = htons(kVCMStatusPort);
+    address.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
+    if (connect(fd, (struct sockaddr *)&address, sizeof(address)) == 0) {
+        NSString *header = [NSString stringWithFormat:
+            @"POST /orientation-diagnostic HTTP/1.1\\r\\nHost: 127.0.0.1\\r\\nContent-Type: application/json\\r\\nContent-Length: %lu\\r\\nConnection: close\\r\\n\\r\\n",
+            (unsigned long)body.length];
+        VCMSendStatusBytes(fd, header.UTF8String, header.length);
+        VCMSendStatusBytes(fd, body.bytes, body.length);
+    }
+    close(fd);
+}
+
 static void VCMLogCameraFrameContract(id object, CMSampleBufferRef sampleBuffer,
                                       CVPixelBufferRef pixelBuffer) {
     uint32_t index = atomic_fetch_add_explicit(&g_vcmOrientationDiagnosticCount, 1,
@@ -136,7 +165,7 @@ static void VCMLogCameraFrameContract(id object, CMSampleBufferRef sampleBuffer,
         VCMDescribeDictionaryKeys(perSampleDictionary)];
     g_vcmLastOrientationDiagnostic = [diagnostic copy];
     NSLog(@"%@", diagnostic);
-    VCMAppendOrientationDiagnostic(diagnostic);
+    VCMSendOrientationDiagnostic(diagnostic);
 
     if (sampleAttachments) CFRelease(sampleAttachments);
 }
