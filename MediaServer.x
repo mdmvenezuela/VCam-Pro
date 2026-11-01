@@ -46,32 +46,6 @@ static const uint16_t kVCMStatusPort = 47831;
 static _Atomic(uint32_t) g_vcmOrientationDiagnosticCount = 0;
 static NSString *g_vcmLastOrientationDiagnostic = @"Sin fotogramas de diagnóstico recibidos.";
 
-static void VCMAppendOrientationDiagnostic(NSString *message) {
-    if (![message isKindOfClass:[NSString class]] || message.length == 0) return;
-    const char *directory = "/var/mobile/Documents";
-    mkdir(directory, 0755);
-    const char *path = "/var/mobile/Documents/VCam-OrientationDiag.log";
-    int fd = open(path, O_WRONLY | O_CREAT | O_APPEND, 0644);
-    if (fd < 0) {
-        NSLog(@"[VCam Pro/OrientationDiag] No se pudo abrir el archivo de diagnóstico: %s", strerror(errno));
-        return;
-    }
-    NSString *line = [message stringByAppendingString:@"\n"];
-    NSData *data = [line dataUsingEncoding:NSUTF8StringEncoding];
-    const uint8_t *bytes = data.bytes;
-    size_t remaining = data.length;
-    while (remaining > 0) {
-        ssize_t written = write(fd, bytes, remaining);
-        if (written < 0) {
-            if (errno == EINTR) continue;
-            break;
-        }
-        if (written == 0) break;
-        bytes += written;
-        remaining -= (size_t)written;
-    }
-    close(fd);
-}
 
 static NSString *VCMDescribeDictionaryKeys(CFDictionaryRef dictionary) {
     if (!dictionary) return @"[]";
