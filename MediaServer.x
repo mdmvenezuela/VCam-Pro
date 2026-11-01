@@ -71,6 +71,37 @@ static NSString *VCMDescribeDictionaryKeys(CFDictionaryRef dictionary) {
 
 static BOOL VCMSendStatusBytes(int fd, const void *bytes, size_t length);
 
+static NSString *VCMDescribeDictionaryEntries(CFDictionaryRef dictionary) {
+    if (!dictionary) return @"{}";
+    CFIndex count = CFDictionaryGetCount(dictionary);
+    if (count <= 0) return @"{}";
+    const void **keys = calloc((size_t)count, sizeof(void *));
+    const void **values = calloc((size_t)count, sizeof(void *));
+    if (!keys || !values) {
+        free(keys);
+        free(values);
+        return @"{allocation-failed}";
+    }
+    CFDictionaryGetKeysAndValues(dictionary, keys, values);
+    NSMutableArray<NSString *> *entries = [NSMutableArray arrayWithCapacity:(NSUInteger)count];
+    for (CFIndex index = 0; index < count; index++) {
+        if (!keys[index]) continue;
+        NSString *key = CFGetTypeID(keys[index]) == CFStringGetTypeID()
+            ? (__bridge NSString *)keys[index]
+            : [NSString stringWithFormat:@"<key-type-%lu>", (unsigned long)CFGetTypeID(keys[index])];
+        CFStringRef copiedDescription = values[index] ? CFCopyDescription(values[index]) : NULL;
+        NSString *value = copiedDescription ? [(__bridge NSString *)copiedDescription copy] : @"(null)";
+        if (copiedDescription) CFRelease(copiedDescription);
+        if (value.length > 180) value = [[value substringToIndex:180] stringByAppendingString:@"…"];
+        [entries addObject:[NSString stringWithFormat:@"%@=%@", key, value]];
+    }
+    free(keys);
+    free(values);
+    [entries sortUsingSelector:@selector(compare:)];
+    NSString *result = [NSString stringWithFormat:@"{%@}", [entries componentsJoinedByString:@";"]];
+    return result.length > 2400 ? [[result substringToIndex:2400] stringByAppendingString:@"…}"] : result;
+}
+
 static void VCMSendOrientationDiagnostic(NSString *diagnostic) {
     if (![diagnostic isKindOfClass:[NSString class]] || diagnostic.length == 0) return;
     NSDictionary *payload = @{@"line": diagnostic};
