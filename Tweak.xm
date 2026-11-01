@@ -30,6 +30,7 @@ static const CGFloat kVCamButtonMargin = 12.0;
 #pragma mark - Process State
 
 static BOOL g_isSpringBoardProcess = NO;
+static dispatch_source_t g_orientationDiagnosticTimer = nil;
 static BOOL g_vcamEnabled = NO;
 static CGFloat g_vcamZoom = 1.0;
 static CGFloat g_vcamOffsetX = 0.0;
