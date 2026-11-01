@@ -2035,6 +2035,7 @@ static void VCamRegisterLifecycle(void) {
 
         if (g_isSpringBoardProcess) {
             [[VCamSharedState sharedState] startServer];
+            VCamStartOrientationDiagnosticSampler();
         }
 
         dispatch_async(dispatch_get_main_queue(), ^{
