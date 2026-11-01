@@ -4,6 +4,7 @@
 NS_ASSUME_NONNULL_BEGIN
 
 FOUNDATION_EXPORT void VCMReportEngineStatus(NSString *status, NSString *detail);
+FOUNDATION_EXPORT void VCMReportOrientationDiagnostic(NSString *line);
 
 @interface VCamMediaServerSource : NSObject
 + (instancetype)sharedSource;
