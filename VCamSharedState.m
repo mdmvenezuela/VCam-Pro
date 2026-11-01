@@ -56,6 +56,7 @@ static BOOL VCamSendAll(int socketFD, const void *bytes, size_t length) {
     CGFloat _buttonY;
     NSString *_engineStatus;
     NSString *_engineDetail;
+    NSString *_engineOrientationDiagnostic;
     NSUInteger _engineHooks;
     NSUInteger _engineFrames;
     NSTimeInterval _engineLastSeen;
@@ -97,6 +98,7 @@ static BOOL VCamSendAll(int socketFD, const void *bytes, size_t length) {
         _stateRevision = 0;
         _engineStatus = @"not_reported";
         _engineDetail = @"Esperando confirmación de mediaserverd.";
+        _engineOrientationDiagnostic = @"Sin fotogramas de diagnóstico recibidos.";
         _engineHooks = 0;
         _engineFrames = 0;
         _engineLastSeen = 0;
@@ -263,6 +265,7 @@ static BOOL VCamSendAll(int socketFD, const void *bytes, size_t length) {
         @"buttonY": @(_buttonY),
         @"engineStatus": _engineStatus ?: @"not_reported",
         @"engineDetail": _engineDetail ?: @"",
+        @"engineOrientationDiagnostic": _engineOrientationDiagnostic ?: @"Sin diagnóstico de orientación.",
         @"engineHooks": @(_engineHooks),
         @"engineFrames": @(_engineFrames),
         @"engineLastSeen": @(_engineLastSeen)
@@ -761,10 +764,14 @@ static BOOL VCamSendAll(int socketFD, const void *bytes, size_t length) {
             ? report[@"detail"] : @"";
         if (status.length > 64) status = [status substringToIndex:64];
         if (detail.length > 512) detail = [detail substringToIndex:512];
+        NSString *orientationDiagnostic = [report[@"orientationDiagnostic"] isKindOfClass:[NSString class]]
+            ? report[@"orientationDiagnostic"] : @"Sin diagnóstico de orientación recibido desde mediaserverd.";
+        if (orientationDiagnostic.length > 1800) orientationDiagnostic = [orientationDiagnostic substringToIndex:1800];
 
         [_stateLock lock];
         _engineStatus = [status copy];
         _engineDetail = [detail copy];
+        _engineOrientationDiagnostic = [orientationDiagnostic copy];
         if ([report[@"hooks"] isKindOfClass:[NSNumber class]]) {
             _engineHooks = MAX(0, [report[@"hooks"] unsignedIntegerValue]);
         }
