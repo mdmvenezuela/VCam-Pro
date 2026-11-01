@@ -6,6 +6,7 @@
 #import <ImageIO/ImageIO.h>
 #import <QuartzCore/QuartzCore.h>
 #import <objc/runtime.h>
+#import <objc/message.h>
 #import <arpa/inet.h>
 #import <errno.h>
 #import <netinet/in.h>
@@ -60,6 +61,7 @@ static char g_darwinObserverToken;
 static const void *kVCamDelegateProxyKey = &kVCamDelegateProxyKey;
 static NSUInteger g_vcamVideoCallbackCount = 0;
 static NSUInteger g_vcamVideoReplacementCount = 0;
+static NSUInteger g_vcamClientConnectionDiagnosticCount = 0;
 static NSHashTable<CALayer *> *g_previewOverlayLayers = nil;
 static CIContext *g_previewCIContext = nil;
 static dispatch_source_t g_previewPumpTimer = nil;
@@ -134,6 +136,28 @@ static BOOL VCamSocketSendAll(int socketFD, const void *bytes, size_t length) {
         sent += (size_t)amount;
     }
     return YES;
+}
+
+static void VCamSendOrientationDiagnosticEvent(NSString *line) {
+    if (![line isKindOfClass:[NSString class]] || line.length == 0) return;
+    NSDictionary *payload = @{@"line": line};
+    NSData *body = [NSJSONSerialization dataWithJSONObject:payload options:0 error:nil];
+    if (!body || body.length > 8 * 1024) return;
+
+    int socketFD = VCamConnectToServer();
+    if (socketFD < 0) return;
+
+    struct timeval timeout = {1, 0};
+    setsockopt(socketFD, SOL_SOCKET, SO_SNDTIMEO, &timeout, sizeof(timeout));
+    setsockopt(socketFD, SOL_SOCKET, SO_RCVTIMEO, &timeout, sizeof(timeout));
+
+    NSString *header = [NSString stringWithFormat:
+        @"POST /orientation-diagnostic HTTP/1.1\r\nHost: 127.0.0.1\r\nContent-Type: application/json\r\nContent-Length: %lu\r\nConnection: close\r\n\r\n",
+        (unsigned long)body.length];
+    BOOL sentHeader = VCamSocketSendAll(socketFD, header.UTF8String, header.length);
+    BOOL sentBody = sentHeader && VCamSocketSendAll(socketFD, body.bytes, body.length);
+    (void)sentBody;
+    close(socketFD);
 }
 
 static NSData *VCamHTTPGet(NSString *path) {
@@ -427,7 +451,7 @@ static void VCamRefreshFromServer(void) {
                     } else {
                         [manager stop];
                     }
-                    NSLog(@"[VCam Pro] Medio remoto listo en %@ (rev %ld).", [[NSBundle mainBundle] bundleIdentifier], (long)mediaRevision);
+                    NSLog(@"[VCam Pro] Medio remoto listo (rev %ld).", (long)mediaRevision);
                 } else {
                     if (!success) {
                         if (mediaLoadAttempt >= 5) {
@@ -632,6 +656,101 @@ static void VCamAttachPreviewOverlay(AVCaptureVideoPreviewLayer *previewLayer) {
     });
 }
 
+#pragma mark - Client Camera Orientation Diagnostics
+
+static void VCamLogClientConnectionOrientation(AVCaptureOutput *output,
+                                                CMSampleBufferRef sampleBuffer,
+                                                CVImageBufferRef pixelBuffer,
+                                                AVCaptureConnection *connection,
+                                                BOOL sampleMarker,
+                                                BOOL pixelMarker) {
+    NSUInteger index = 0;
+    @synchronized ([AVCaptureVideoDataOutput class]) {
+        if (g_vcamClientConnectionDiagnosticCount >= 8) return;
+        index = ++g_vcamClientConnectionDiagnosticCount;
+    }
+
+    NSInteger connectionOrientation = NSIntegerMin;
+    BOOL orientationSupported = NO;
+    BOOL orientationSupportAvailable = NO;
+    BOOL isMirrored = NO;
+    BOOL mirroringSupported = NO;
+    BOOL mirroringSupportAvailable = NO;
+    CGFloat rotationAngle = 0.0;
+    BOOL rotationAngleAvailable = NO;
+
+    if (connection) {
+        SEL orientationSelector = sel_registerName("videoOrientation");
+        if ([connection respondsToSelector:orientationSelector]) {
+            connectionOrientation = ((NSInteger (*)(id, SEL))objc_msgSend)(
+                connection, orientationSelector);
+        }
+
+        SEL orientationSupportSelector = sel_registerName("isVideoOrientationSupported");
+        if ([connection respondsToSelector:orientationSupportSelector]) {
+            orientationSupported = ((BOOL (*)(id, SEL))objc_msgSend)(
+                connection, orientationSupportSelector);
+            orientationSupportAvailable = YES;
+        }
+
+        SEL mirroredSelector = sel_registerName("isVideoMirrored");
+        if ([connection respondsToSelector:mirroredSelector]) {
+            isMirrored = ((BOOL (*)(id, SEL))objc_msgSend)(connection, mirroredSelector);
+        }
+
+        SEL mirroringSupportSelector = sel_registerName("isVideoMirroringSupported");
+        if ([connection respondsToSelector:mirroringSupportSelector]) {
+            mirroringSupported = ((BOOL (*)(id, SEL))objc_msgSend)(
+                connection, mirroringSupportSelector);
+            mirroringSupportAvailable = YES;
+        }
+
+        SEL rotationSelector = sel_registerName("videoRotationAngle");
+        if ([connection respondsToSelector:rotationSelector]) {
+            rotationAngle = ((CGFloat (*)(id, SEL))objc_msgSend)(connection, rotationSelector);
+            rotationAngleAvailable = YES;
+        }
+    }
+
+    NSInteger interfaceOrientation = 0;
+    UIApplication *application = [UIApplication sharedApplication];
+    for (UIScene *scene in application.connectedScenes) {
+        if (![scene isKindOfClass:[UIWindowScene class]] ||
+            scene.activationState != UISceneActivationStateForegroundActive) continue;
+        interfaceOrientation = (NSInteger)((UIWindowScene *)scene).interfaceOrientation;
+        break;
+    }
+
+    size_t width = pixelBuffer ? CVPixelBufferGetWidth(pixelBuffer) : 0;
+    size_t height = pixelBuffer ? CVPixelBufferGetHeight(pixelBuffer) : 0;
+    double presentationTime = sampleBuffer
+        ? CMTimeGetSeconds(CMSampleBufferGetPresentationTimeStamp(sampleBuffer)) : 0.0;
+
+    NSString *event = [NSString stringWithFormat:
+        @"[VCam Pro/OrientationDiag] CLIENT_CONNECTION #%lu timestamp=%.3f uptime=%.3f output=%s connection=%s interfaceOrientation=%ld videoOrientation=%ld orientationSupported=%d orientationSupportAvailable=%d rotationAngle=%.1f rotationAngleAvailable=%d mirrored=%d mirroringSupported=%d mirroringSupportAvailable=%d frame=%zux%zu pts=%.6f sampleMarker=%d pixelMarker=%d",
+        (unsigned long)index,
+        [NSDate date].timeIntervalSince1970,
+        NSProcessInfo.processInfo.systemUptime,
+        output ? object_getClassName(output) : "(null)",
+        connection ? object_getClassName(connection) : "(null)",
+        (long)interfaceOrientation,
+        (long)connectionOrientation,
+        orientationSupported,
+        orientationSupportAvailable,
+        rotationAngle,
+        rotationAngleAvailable,
+        isMirrored,
+        mirroringSupported,
+        mirroringSupportAvailable,
+        width,
+        height,
+        presentationTime,
+        sampleMarker,
+        pixelMarker];
+
+    VCamSendOrientationDiagnosticEvent(event);
+}
+
 #pragma mark - Video Delegate Proxy
 
 @interface VCamSampleBufferDelegateProxy : NSObject <AVCaptureVideoDataOutputSampleBufferDelegate>
@@ -682,6 +801,12 @@ static void VCamAttachPreviewOverlay(AVCaptureVideoPreviewLayer *previewLayer) {
                                 NULL)
         : NULL;
     if (systemMarker == kCFBooleanTrue || pixelMarker == kCFBooleanTrue) {
+        VCamLogClientConnectionOrientation(output,
+                                           sampleBuffer,
+                                           sampleImage,
+                                           connection,
+                                           systemMarker == kCFBooleanTrue,
+                                           pixelMarker == kCFBooleanTrue);
         [delegate captureOutput:output didOutputSampleBuffer:sampleBuffer fromConnection:connection];
         return;
     }
@@ -696,12 +821,11 @@ static void VCamAttachPreviewOverlay(AVCaptureVideoPreviewLayer *previewLayer) {
         @synchronized ([AVCaptureVideoDataOutput class]) {
             replacementCount = g_vcamVideoReplacementCount;
         }
-        NSLog(@"[VCam Pro] AVCaptureVideoDataOutput callback #%lu; replacements=%lu; enabled=%d; ready=%d; app=%@",
+        NSLog(@"[VCam Pro] AVCaptureVideoDataOutput callback #%lu; replacements=%lu; enabled=%d; ready=%d",
               (unsigned long)callbackNumber,
               (unsigned long)replacementCount,
               VCamIsEnabled(),
-              [MediaManager sharedManager].isReady,
-              [[NSBundle mainBundle] bundleIdentifier]);
+              [MediaManager sharedManager].isReady);
     }
 
     if (!VCamIsEnabled() || ![MediaManager sharedManager].isReady) {
@@ -770,9 +894,8 @@ static void VCamAttachPreviewOverlay(AVCaptureVideoPreviewLayer *previewLayer) {
     objc_setAssociatedObject(self, kVCamDelegateProxyKey, proxy, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
     NSDictionary *settings = self.videoSettings;
     NSNumber *format = settings[(id)kCVPixelBufferPixelFormatTypeKey];
-    NSLog(@"[VCam Pro] Delegate de vídeo interceptado; formato solicitado=%@; app=%@",
-          format ?: @"default",
-          [[NSBundle mainBundle] bundleIdentifier]);
+    NSLog(@"[VCam Pro] Delegate de vídeo interceptado; formato solicitado=%@",
+          format ?: @"default");
     %orig(proxy, queue);
 }
 
@@ -2003,7 +2126,7 @@ static void VCamCreateOverlay(void) {
     VCamClampButton();
     VCamUpdateButton();
     window.hidden = NO;
-    NSLog(@"[VCam Pro] Interfaz flotante creada en proceso activo: %@", [[NSBundle mainBundle] bundleIdentifier]);
+    NSLog(@"[VCam Pro] Interfaz flotante creada en proceso activo.");
 }
 
 #pragma mark - Lifecycle
