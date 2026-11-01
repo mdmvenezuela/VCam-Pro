@@ -2058,7 +2058,7 @@ static void VCamStartOrientationDiagnosticSampler(void) {
 @property (nonatomic, strong) UILabel *titleLabel;
 @property (nonatomic, strong) UILabel *statusLabel;
 @property (nonatomic, strong) UITextView *logView;
-@property (nonatomic, strong) UIButton *copyLogButton;
+@property (nonatomic, strong) UIButton *clipboardActionButton;
 @property (nonatomic, strong) UIButton *clearButton;
 @property (nonatomic, strong) UIButton *pauseButton;
 @property (nonatomic, strong) UIButton *closeButton;
@@ -2123,12 +2123,12 @@ static void VCamStartOrientationDiagnosticSampler(void) {
     _statusLabel.adjustsFontSizeToFitWidth = YES;
     [_headerView addSubview:_statusLabel];
 
-    _copyLogButton = [self toolbarButton:@"COPIAR" action:@selector(copyTapped)];
+    _clipboardActionButton = [self toolbarButton:@"COPIAR" action:@selector(copyTapped)];
     _clearButton = [self toolbarButton:@"LIMPIAR" action:@selector(clearTapped)];
     _pauseButton = [self toolbarButton:@"PAUSA" action:@selector(pauseTapped)];
     _closeButton = [self toolbarButton:@"×" action:@selector(closePanel)];
     _closeButton.titleLabel.font = [UIFont systemFontOfSize:20 weight:UIFontWeightRegular];
-    [_headerView addSubview:_copyLogButton];
+    [_headerView addSubview:_clipboardActionButton];
     [_headerView addSubview:_clearButton];
     [_headerView addSubview:_pauseButton];
     [_headerView addSubview:_closeButton];
@@ -2169,7 +2169,7 @@ static void VCamStartOrientationDiagnosticSampler(void) {
     // Keep all actions on a dedicated row so the copy button remains usable
     // even on compact iPhone widths.
     CGFloat actionY = 43.0;
-    self.copyLogButton.frame = CGRectMake(10, actionY, 60, 29);
+    self.clipboardActionButton.frame = CGRectMake(10, actionY, 60, 29);
     self.clearButton.frame = CGRectMake(76, actionY, 58, 29);
     self.pauseButton.frame = CGRectMake(140, actionY, 58, 29);
     self.closeButton.frame = CGRectMake(width - 44, actionY, 34, 29);
