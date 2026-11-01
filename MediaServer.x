@@ -47,28 +47,6 @@ static _Atomic(uint32_t) g_vcmOrientationDiagnosticCount = 0;
 static NSString *g_vcmLastOrientationDiagnostic = @"Sin fotogramas de diagnóstico recibidos.";
 
 
-static NSString *VCMDescribeDictionaryKeys(CFDictionaryRef dictionary) {
-    if (!dictionary) return @"[]";
-    CFIndex count = CFDictionaryGetCount(dictionary);
-    if (count <= 0) return @"[]";
-    const void **keys = calloc((size_t)count, sizeof(void *));
-    if (!keys) return @"[allocation-failed]";
-    CFDictionaryGetKeysAndValues(dictionary, keys, NULL);
-    NSMutableArray<NSString *> *names = [NSMutableArray arrayWithCapacity:(NSUInteger)count];
-    for (CFIndex index = 0; index < count; index++) {
-        const void *key = keys[index];
-        if (!key) continue;
-        if (CFGetTypeID(key) == CFStringGetTypeID()) {
-            [names addObject:(__bridge NSString *)key];
-        } else {
-            [names addObject:[NSString stringWithFormat:@"<%s>", CFGetTypeID(key) == CFNumberGetTypeID() ? "number" : "non-string"]];
-        }
-    }
-    free(keys);
-    [names sortUsingSelector:@selector(compare:)];
-    return [NSString stringWithFormat:@"[%@]", [names componentsJoinedByString:@","]];
-}
-
 static BOOL VCMSendStatusBytes(int fd, const void *bytes, size_t length);
 
 static NSString *VCMDescribeDictionaryEntries(CFDictionaryRef dictionary) {
