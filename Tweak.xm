@@ -31,6 +31,8 @@ static const CGFloat kVCamButtonMargin = 12.0;
 
 static BOOL g_isSpringBoardProcess = NO;
 static dispatch_source_t g_orientationDiagnosticTimer = nil;
+static NSInteger g_lastDiagnosticDeviceOrientation = NSIntegerMin;
+static NSInteger g_lastDiagnosticInterfaceOrientation = NSIntegerMin;
 static BOOL g_vcamEnabled = NO;
 static CGFloat g_vcamZoom = 1.0;
 static CGFloat g_vcamOffsetX = 0.0;
@@ -1726,13 +1728,34 @@ static void VCamUpdateOrientationDiagnosticContext(void) {
         interfaceOrientation = application.statusBarOrientation;
     }
 #pragma clang diagnostic pop
+    NSDate *now = [NSDate date];
+    NSString *timestamp = [NSString stringWithFormat:@"%.3f", now.timeIntervalSince1970];
     NSString *context = [NSString stringWithFormat:
         @"timestamp=%@ deviceOrientation=%@(%ld) interfaceOrientation=%@(%ld) scene=%@ appState=%ld statusBarHidden=%@",
-        [[NSDate date] description],
+        now,
         VCamDeviceOrientationName(device.orientation), (long)device.orientation,
         VCamInterfaceOrientationName(interfaceOrientation), (long)interfaceOrientation,
         sceneState, (long)application.applicationState, statusBarHidden];
     [[VCamSharedState sharedState] updateDiagnosticOrientationContext:context];
+
+    NSInteger deviceValue = (NSInteger)device.orientation;
+    NSInteger interfaceValue = (NSInteger)interfaceOrientation;
+    BOOL deviceChanged = deviceValue != g_lastDiagnosticDeviceOrientation;
+    BOOL interfaceChanged = interfaceValue != g_lastDiagnosticInterfaceOrientation;
+    if (deviceChanged || interfaceChanged) {
+        NSString *event = [NSString stringWithFormat:
+            @"[VCam Pro/OrientationDiag] ORIENTATION_CHANGE timestamp=%@ uptime=%.3f device=%@(%ld)%@ interface=%@(%ld)%@ scene=%@ appState=%ld statusBarHidden=%@",
+            timestamp,
+            NSProcessInfo.processInfo.systemUptime,
+            VCamDeviceOrientationName(device.orientation), (long)device.orientation,
+            deviceChanged ? @" [changed]" : @"",
+            VCamInterfaceOrientationName(interfaceOrientation), (long)interfaceOrientation,
+            interfaceChanged ? @" [changed]" : @"",
+            sceneState, (long)application.applicationState, statusBarHidden];
+        [[VCamSharedState sharedState] appendDiagnosticOrientationEvent:event];
+        g_lastDiagnosticDeviceOrientation = deviceValue;
+        g_lastDiagnosticInterfaceOrientation = interfaceValue;
+    }
 }
 
 static void VCamStartOrientationDiagnosticSampler(void) {
