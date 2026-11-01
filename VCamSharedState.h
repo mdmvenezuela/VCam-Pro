@@ -27,6 +27,8 @@ NS_ASSUME_NONNULL_BEGIN
 
 /// Receives the latest UIKit orientation snapshot from SpringBoard for frame diagnostics.
 - (void)updateDiagnosticOrientationContext:(NSString *)context;
+/// Appends a timestamped orientation-change event to the diagnostic log.
+- (void)appendDiagnosticOrientationEvent:(NSString *)event;
 
 /// Imports media into SpringBoard's private container and publishes it to app processes.
 - (BOOL)importImage:(UIImage *)image error:(NSError * _Nullable * _Nullable)error;
