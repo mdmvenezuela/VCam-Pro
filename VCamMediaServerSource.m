@@ -999,7 +999,7 @@ static void VCMSharedStateDidChange(CFNotificationCenterRef center,
         &g_vcmRenderDiagnosticCount, 1, memory_order_relaxed);
     if (renderDiagnostic < 24) {
         NSString *diagnostic = [NSString stringWithFormat:
-            @"[VCam Pro/OrientationDiag] render #%u media=%@ source=%.1fx%.1f target=%zux%zu rotation=%ld mirror=%d preferred=[%.3f %.3f %.3f %.3f %.3f %.3f]",
+            @"[VCam Pro/OrientationDiag] render #%u path=in-place media=%@ source=%.1fx%.1f target=%zux%zu rotation=%ld mirror=%d preferred=[%.3f %.3f %.3f %.3f %.3f %.3f]",
             renderDiagnostic + 1,
             videoMode ? @"video" : @"image",
             sourceImage.extent.size.width,
@@ -1073,7 +1073,6 @@ static void VCMSharedStateDidChange(CFNotificationCenterRef center,
     CGRect targetBounds = CGRectMake(0, 0, width, height);
     CIImage *cropped = [positioned imageByCroppingToRect:targetBounds];
 
-
     // Render into the camera-owned pixel buffer. Its original dimensions,
     // pixel format, format description and orientation attachments are retained;
     // Core Image writes the replacement image into the existing pixel memory.
@@ -1096,6 +1095,5 @@ static void VCMSharedStateDidChange(CFNotificationCenterRef center,
     }
 
     return YES;
-
 }
 @end
