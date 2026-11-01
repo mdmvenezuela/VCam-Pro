@@ -157,19 +157,20 @@ static void VCMLogCameraFrameContract(id object, CMSampleBufferRef sampleBuffer,
         ? (CFDictionaryRef)CFArrayGetValueAtIndex(perSample, 0) : NULL;
 
     NSString *diagnostic = [NSString stringWithFormat:
-        @"[VCam Pro/OrientationDiag] #%u node=%s pixel=%zux%zu format=%dx%d pixelFormat=%u formatExt=%@ pixelProp=%@ pixelNoProp=%@ sampleProp=%@ sampleEntry=%@",
+        @"[VCam Pro/OrientationDiag] #%u node=%s pixel=%zux%zu rowBytes=%zu format=%dx%d pixelFormat=%u formatExtValues=%@ pixelPropValues=%@ pixelNoPropValues=%@ samplePropValues=%@ sampleEntryValues=%@",
         index + 1,
         object_getClassName(object),
         CVPixelBufferGetWidth(pixelBuffer),
         CVPixelBufferGetHeight(pixelBuffer),
+        CVPixelBufferGetBytesPerRow(pixelBuffer),
         formatDimensions.width,
         formatDimensions.height,
         (unsigned int)CVPixelBufferGetPixelFormatType(pixelBuffer),
-        VCMDescribeDictionaryKeys(formatExtensions),
-        VCMDescribeDictionaryKeys(propagated),
-        VCMDescribeDictionaryKeys(nonPropagated),
-        VCMDescribeDictionaryKeys(sampleAttachments),
-        VCMDescribeDictionaryKeys(perSampleDictionary)];
+        VCMDescribeDictionaryEntries(formatExtensions),
+        VCMDescribeDictionaryEntries(propagated),
+        VCMDescribeDictionaryEntries(nonPropagated),
+        VCMDescribeDictionaryEntries(sampleAttachments),
+        VCMDescribeDictionaryEntries(perSampleDictionary)];
     g_vcmLastOrientationDiagnostic = [diagnostic copy];
     NSLog(@"%@", diagnostic);
     VCMSendOrientationDiagnostic(diagnostic);
