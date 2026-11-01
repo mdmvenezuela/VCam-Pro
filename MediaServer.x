@@ -118,7 +118,7 @@ static void VCMSendOrientationDiagnostic(NSString *diagnostic) {
     address.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
     if (connect(fd, (struct sockaddr *)&address, sizeof(address)) == 0) {
         NSString *header = [NSString stringWithFormat:
-            @"POST /orientation-diagnostic HTTP/1.1\\r\\nHost: 127.0.0.1\\r\\nContent-Type: application/json\\r\\nContent-Length: %lu\\r\\nConnection: close\\r\\n\\r\\n",
+            @"POST /orientation-diagnostic HTTP/1.1\r\nHost: 127.0.0.1\r\nContent-Type: application/json\r\nContent-Length: %lu\r\nConnection: close\r\n\r\n",
             (unsigned long)body.length];
         VCMSendStatusBytes(fd, header.UTF8String, header.length);
         VCMSendStatusBytes(fd, body.bytes, body.length);
