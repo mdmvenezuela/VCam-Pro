@@ -1673,6 +1673,74 @@ static void VCamShowEngineDiagnostics(void) {
     });
 }
 
+static void VCamShowOrientationDiagnostics(void) {
+    NSString *directory = @"/var/mobile/Documents";
+    NSString *path = [directory stringByAppendingPathComponent:@"VCam-OrientationDiag.log"];
+    NSFileManager *fm = [NSFileManager defaultManager];
+    NSError *directoryError = nil;
+    [fm createDirectoryAtPath:directory withIntermediateDirectories:YES attributes:nil error:&directoryError];
+
+    NSString *probe = [NSString stringWithFormat:@"\n[VCam Pro/OrientationDiag] PANEL_PROBE %@\n",
+                       [[NSDate date] description]];
+    NSData *probeData = [probe dataUsingEncoding:NSUTF8StringEncoding];
+    BOOL probeOK = NO;
+    NSError *writeError = nil;
+    if (![fm fileExistsAtPath:path]) [fm createFileAtPath:path contents:nil attributes:nil];
+    NSFileHandle *handle = [NSFileHandle fileHandleForWritingAtPath:path];
+    if (handle) {
+        @try {
+            [handle seekToEndOfFile];
+            [handle writeData:probeData];
+            [handle synchronizeFile];
+            probeOK = YES;
+            [handle closeFile];
+        } @catch (NSException *exception) {
+            writeError = [NSError errorWithDomain:@"VCamOrientationDiag"
+                                               code:2
+                                           userInfo:@{NSLocalizedDescriptionKey: exception.reason ?: @"Error escribiendo"}];
+            @try { [handle closeFile]; } @catch (__unused NSException *ignored) {}
+        }
+    } else {
+        writeError = directoryError ?: [NSError errorWithDomain:NSPOSIXErrorDomain
+                                                            code:errno
+                                                        userInfo:@{NSLocalizedDescriptionKey:
+                                                            [NSString stringWithFormat:@"No se pudo abrir el archivo (errno=%d)", errno]}];
+    }
+
+    NSDictionary *attributes = [fm attributesOfItemAtPath:path error:nil];
+    unsigned long long fileSize = [attributes[NSFileSize] unsignedLongLongValue];
+    NSString *contents = [NSString stringWithContentsOfFile:path
+                                                   encoding:NSUTF8StringEncoding
+                                                      error:nil] ?: @"";
+    NSArray *lines = [contents componentsSeparatedByCharactersInSet:[NSCharacterSet newlineCharacterSet]];
+    NSUInteger start = lines.count > 14 ? lines.count - 14 : 0;
+    NSArray *lastLines = [lines subarrayWithRange:NSMakeRange(start, lines.count - start)];
+    NSString *tail = [[lastLines componentsJoinedByString:@"\n"] stringByTrimmingCharactersInSet:
+                      [NSCharacterSet whitespaceAndNewlineCharacterSet]];
+    if (tail.length > 2200) tail = [tail substringFromIndex:tail.length - 2200];
+
+    NSString *writeStatus = probeOK
+        ? @"ESCRITURA DEL PANEL: OK"
+        : [NSString stringWithFormat:@"ESCRITURA DEL PANEL: FALLÓ\n%@", writeError.localizedDescription ?: @"Error desconocido"];
+    NSString *message = [NSString stringWithFormat:
+        @"%@\nRuta: %@\nArchivo: %@\nTamaño: %llu bytes\n\nÚltimas líneas:\n%@",
+        writeStatus, path, [fm fileExistsAtPath:path] ? @"EXISTE" : @"NO EXISTE",
+        fileSize, tail.length ? tail : @"(sin contenido)"];
+
+    UIAlertController *alert = [UIAlertController alertControllerWithTitle:@"Diagnóstico de orientación"
+                                                                   message:message
+                                                            preferredStyle:UIAlertControllerStyleAlert];
+    [alert addAction:[UIAlertAction actionWithTitle:@"Copiar diagnóstico"
+                                              style:UIAlertActionStyleDefault
+                                            handler:^(__unused UIAlertAction *action) {
+        UIPasteboard.generalPasteboard.string = message;
+    }]];
+    [alert addAction:[UIAlertAction actionWithTitle:@"Cerrar" style:UIAlertActionStyleCancel handler:nil]];
+    if (g_overlayController && !g_overlayController.presentedViewController) {
+        [g_overlayController presentViewController:alert animated:YES completion:nil];
+    }
+}
+
 static void VCamShowMenu(void) {
     if (!g_overlayController || g_overlayController.presentedViewController ||
         [UIApplication sharedApplication].applicationState != UIApplicationStateActive) return;
@@ -1714,6 +1782,15 @@ static void VCamShowMenu(void) {
         dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.2 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
             if (g_adjustmentPanel) VCamCloseAdjustmentPanel();
             else VCamShowAdjustmentPanel();
+        });
+    }]];
+
+    [menu addAction:[UIAlertAction actionWithTitle:@"Diagnóstico de orientación"
+                                             style:UIAlertActionStyleDefault
+                                           handler:^(UIAlertAction *action) {
+        dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.2 * NSEC_PER_SEC)),
+                       dispatch_get_main_queue(), ^{
+            VCamShowOrientationDiagnostics();
         });
     }]];
 
