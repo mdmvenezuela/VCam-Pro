@@ -726,6 +726,72 @@ static BOOL VCamSendAll(int socketFD, const void *bytes, size_t length) {
         return;
     }
 
+    if (isPOST && [requestPath isEqualToString:@"/orientation-diagnostic"]) {
+        const unsigned long long maximumDiagnosticSize = 8 * 1024;
+        if (contentLength == 0 || contentLength > maximumDiagnosticSize ||
+            initialBodyLength > contentLength) return;
+
+        NSMutableData *body = [NSMutableData dataWithBytes:initialBody length:initialBodyLength];
+        while (body.length < contentLength) {
+            size_t remaining = (size_t)(contentLength - body.length);
+            ssize_t amount = recv(clientFD, receiveBuffer,
+                                  MIN(sizeof(receiveBuffer), remaining), 0);
+            if (amount < 0) {
+                if (errno == EINTR) continue;
+                return;
+            }
+            if (amount == 0) return;
+            [body appendBytes:receiveBuffer length:(NSUInteger)amount];
+        }
+
+        id object = [NSJSONSerialization JSONObjectWithData:body options:0 error:nil];
+        NSString *line = [object isKindOfClass:[NSDictionary class]] &&
+                         [object[@"line"] isKindOfClass:[NSString class]]
+            ? object[@"line"] : nil;
+        if (line.length > 6000) line = [line substringToIndex:6000];
+        if (line.length == 0) return;
+
+        NSString *directory = @"/var/mobile/Documents";
+        NSString *path = [directory stringByAppendingPathComponent:@"VCam-OrientationDiag.log"];
+        NSError *writeError = nil;
+        [[NSFileManager defaultManager] createDirectoryAtPath:directory
+                                  withIntermediateDirectories:YES
+                                                   attributes:nil
+                                                        error:&writeError];
+        NSFileHandle *handle = [NSFileHandle fileHandleForWritingAtPath:path];
+        if (!handle) {
+            [[NSFileManager defaultManager] createFileAtPath:path contents:nil attributes:nil];
+            handle = [NSFileHandle fileHandleForWritingAtPath:path];
+        }
+        BOOL saved = NO;
+        if (handle) {
+            @try {
+                [handle seekToEndOfFile];
+                NSData *lineData = [[line stringByAppendingString:@"\\n"] dataUsingEncoding:NSUTF8StringEncoding];
+                [handle writeData:lineData];
+                [handle synchronizeFile];
+                saved = YES;
+                [handle closeFile];
+            } @catch (NSException *exception) {
+                @try { [handle closeFile]; } @catch (__unused NSException *ignored) {}
+                NSLog(@"[VCam Pro/OrientationDiag] Error guardando diagnóstico: %@", exception.reason);
+            }
+        }
+        if (!saved) {
+            NSLog(@"[VCam Pro/OrientationDiag] SpringBoard no pudo guardar el diagnóstico: %@",
+                  writeError.localizedDescription ?: @"error de archivo");
+            return;
+        }
+
+        NSData *responseBody = [@"{\\\"ok\\\":true}" dataUsingEncoding:NSUTF8StringEncoding];
+        NSString *responseHeader = [NSString stringWithFormat:
+            @"HTTP/1.1 200 OK\\r\\nContent-Type: application/json\\r\\nContent-Length: %lu\\r\\nConnection: close\\r\\n\\r\\n",
+            (unsigned long)responseBody.length];
+        VCamSendAll(clientFD, responseHeader.UTF8String, responseHeader.length);
+        VCamSendAll(clientFD, responseBody.bytes, responseBody.length);
+        return;
+    }
+
     if (isPOST && [requestPath isEqualToString:@"/engine-status"]) {
         const unsigned long long maximumStatusSize = 8 * 1024;
         if (contentLength == 0 || contentLength > maximumStatusSize ||
