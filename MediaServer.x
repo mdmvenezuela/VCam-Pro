@@ -47,9 +47,9 @@ static _Atomic(uint32_t) g_vcmOrientationDiagnosticCount = 0;
 
 static void VCMAppendOrientationDiagnostic(NSString *message) {
     if (![message isKindOfClass:[NSString class]] || message.length == 0) return;
-    const char *directory = "/var/mobile/Downloads";
+    const char *directory = "/var/mobile/Documents";
     mkdir(directory, 0755);
-    const char *path = "/var/mobile/Downloads/VCam-OrientationDiag.log";
+    const char *path = "/var/mobile/Documents/VCam-OrientationDiag.log";
     int fd = open(path, O_WRONLY | O_CREAT | O_APPEND, 0644);
     if (fd < 0) {
         NSLog(@"[VCam Pro/OrientationDiag] No se pudo abrir el archivo de diagnóstico: %s", strerror(errno));

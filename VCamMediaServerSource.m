@@ -25,8 +25,8 @@ static _Atomic(uint32_t) g_vcmRenderDiagnosticCount = 0;
 
 static void VCMAppendRenderDiagnostic(NSString *message) {
     if (![message isKindOfClass:[NSString class]] || message.length == 0) return;
-    mkdir("/var/mobile/Downloads", 0755);
-    int fd = open("/var/mobile/Downloads/VCam-OrientationDiag.log",
+    mkdir("/var/mobile/Documents", 0755);
+    int fd = open("/var/mobile/Documents/VCam-OrientationDiag.log",
                   O_WRONLY | O_CREAT | O_APPEND, 0644);
     if (fd < 0) {
         NSLog(@"[VCam Pro/OrientationDiag] No se pudo abrir el archivo de diagnóstico: %s", strerror(errno));
