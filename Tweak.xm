@@ -1991,6 +1991,10 @@ static void VCamUpdateClientOrientationDiagnosticContext(void) {
             }
         }
     }
+    // Ignore UIKit-linked daemons and background helpers. Only the app with an
+    // active foreground scene can provide the orientation relevant to its UI.
+    if (![sceneState isEqualToString:@"foreground_active"]) return;
+
 #pragma clang diagnostic push
 #pragma clang diagnostic ignored "-Wdeprecated-declarations"
     if (interfaceOrientation == UIInterfaceOrientationUnknown) {

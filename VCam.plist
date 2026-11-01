@@ -4,6 +4,13 @@
 <dict>
     <key>Filter</key>
     <dict>
+        <key>Mode</key>
+        <string>Any</string>
+        <key>Bundles</key>
+        <array>
+            <string>com.apple.springboard</string>
+            <string>com.apple.camera</string>
+        </array>
         <key>Classes</key>
         <array>
             <string>UIApplication</string>
