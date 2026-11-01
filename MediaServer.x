@@ -443,6 +443,57 @@ static CMSampleBufferRef VCMCreateReplacementSampleBuffer(
     return replacementSampleBuffer;
 }
 
+static _Atomic(uint32_t) g_vcmDeliveredDiagnosticCount = 0;
+
+static void VCMLogReplacementFrameContract(id object,
+                                           CMSampleBufferRef sampleBuffer,
+                                           CVPixelBufferRef pixelBuffer) {
+    uint32_t index = atomic_fetch_add_explicit(&g_vcmDeliveredDiagnosticCount, 1,
+                                               memory_order_relaxed);
+    if (index >= 24 || !sampleBuffer || !pixelBuffer) return;
+
+    CMFormatDescriptionRef format = CMSampleBufferGetFormatDescription(sampleBuffer);
+    CMVideoDimensions dimensions = {0, 0};
+    CFDictionaryRef formatExtensions = NULL;
+    if (format && CMFormatDescriptionGetMediaType(format) == kCMMediaType_Video) {
+        dimensions = CMVideoFormatDescriptionGetDimensions(
+            (CMVideoFormatDescriptionRef)format);
+        formatExtensions = CMFormatDescriptionGetExtensions(format);
+    }
+
+    CFDictionaryRef propagated = CVBufferGetAttachments(
+        pixelBuffer, kCVAttachmentMode_ShouldPropagate);
+    CFDictionaryRef nonPropagated = CVBufferGetAttachments(
+        pixelBuffer, kCVAttachmentMode_ShouldNotPropagate);
+    CFDictionaryRef sampleAttachments = CMCopyDictionaryOfAttachments(
+        kCFAllocatorDefault, sampleBuffer, kCMAttachmentMode_ShouldPropagate);
+    CFArrayRef perSample = CMSampleBufferGetSampleAttachmentsArray(sampleBuffer, false);
+    CFDictionaryRef perSampleDictionary = perSample && CFArrayGetCount(perSample) > 0
+        ? (CFDictionaryRef)CFArrayGetValueAtIndex(perSample, 0) : NULL;
+
+    NSString *diagnostic = [NSString stringWithFormat:
+        @"[VCam Pro/OrientationDiag] FRAME_DELIVERED timestamp=%.3f uptime=%.3f #%u node=%s pixel=%zux%zu rowBytes=%zu format=%dx%d pixelFormat=%u formatExtValues=%@ pixelPropValues=%@ pixelNoPropValues=%@ samplePropValues=%@ sampleEntryValues=%@",
+        [NSDate date].timeIntervalSince1970,
+        NSProcessInfo.processInfo.systemUptime,
+        index + 1,
+        object_getClassName(object),
+        CVPixelBufferGetWidth(pixelBuffer),
+        CVPixelBufferGetHeight(pixelBuffer),
+        CVPixelBufferGetBytesPerRow(pixelBuffer),
+        dimensions.width,
+        dimensions.height,
+        (unsigned int)CVPixelBufferGetPixelFormatType(pixelBuffer),
+        VCMDescribeDictionaryEntries(formatExtensions),
+        VCMDescribeDictionaryEntries(propagated),
+        VCMDescribeDictionaryEntries(nonPropagated),
+        VCMDescribeDictionaryEntries(sampleAttachments),
+        VCMDescribeDictionaryEntries(perSampleDictionary)];
+    NSLog(@"%@", diagnostic);
+    VCMSendOrientationDiagnostic(diagnostic);
+
+    if (sampleAttachments) CFRelease(sampleAttachments);
+}
+
 static void VCMEmitSampleBuffer(id object,
                                 SEL selector,
                                 CMSampleBufferRef sampleBuffer) {
@@ -516,6 +567,10 @@ static void VCMEmitSampleBuffer(id object,
         original(object, selector, sampleBuffer);
         return;
     }
+
+    VCMLogReplacementFrameContract(object,
+                                   replacementSampleBuffer,
+                                   CMSampleBufferGetImageBuffer(replacementSampleBuffer));
 
     uint32_t count = atomic_fetch_add_explicit(&g_vcmReplacementCount,
                                                1,
