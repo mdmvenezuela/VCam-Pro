@@ -761,6 +761,10 @@ static BOOL VCamSendAll(int socketFD, const void *bytes, size_t length) {
         if (line.length > 6000) line = [line substringToIndex:6000];
         if (line.length == 0) return;
 
+        [_stateLock lock];
+        NSString *orientationContext = [_diagnosticOrientationContext copy] ?: @"UIKit orientation context unavailable";
+        [_stateLock unlock];
+        NSString *completeLine = [NSString stringWithFormat:@"%@ | SPRINGBOARD_CONTEXT={%@}", line, orientationContext];
         NSString *directory = @"/var/mobile/Documents";
         NSString *path = [directory stringByAppendingPathComponent:@"VCam-OrientationDiag.log"];
         NSError *writeError = nil;
