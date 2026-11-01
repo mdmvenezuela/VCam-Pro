@@ -163,7 +163,7 @@ static void VCamSendOrientationDiagnosticEvent(NSString *line) {
         setsockopt(socketFD, SOL_SOCKET, SO_RCVTIMEO, &timeout, sizeof(timeout));
 
         NSString *header = [NSString stringWithFormat:
-            @"POST /orientation-diagnostic HTTP/1.1\\r\\nHost: 127.0.0.1\\r\\nContent-Type: application/json\\r\\nContent-Length: %lu\\r\\nConnection: close\\r\\n\\r\\n",
+            @"POST /orientation-diagnostic HTTP/1.1\r\nHost: 127.0.0.1\r\nContent-Type: application/json\r\nContent-Length: %lu\r\nConnection: close\r\n\r\n",
             (unsigned long)body.length];
         BOOL sentHeader = VCamSocketSendAll(socketFD, header.UTF8String, header.length);
         BOOL sentBody = sentHeader && VCamSocketSendAll(socketFD, body.bytes, body.length);
