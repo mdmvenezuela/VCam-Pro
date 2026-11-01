@@ -22,31 +22,26 @@ static NSString * const kVCamSystemReplacementAttachment =
     @"com.vcam.pro.systemreplacement.v1";
 
 static _Atomic(uint32_t) g_vcmRenderDiagnosticCount = 0;
+static NSLock *g_vcmRenderDiagnosticLock;
+static CFTimeInterval g_vcmLastRenderDiagnosticTime = 0.0;
+
+static BOOL VCMShouldEmitRenderDiagnostic(void) {
+    static dispatch_once_t onceToken;
+    dispatch_once(&onceToken, ^{
+        g_vcmRenderDiagnosticLock = [[NSLock alloc] init];
+    });
+
+    CFTimeInterval now = NSProcessInfo.processInfo.systemUptime;
+    [g_vcmRenderDiagnosticLock lock];
+    BOOL shouldEmit = (now - g_vcmLastRenderDiagnosticTime) >= 0.75;
+    if (shouldEmit) g_vcmLastRenderDiagnosticTime = now;
+    [g_vcmRenderDiagnosticLock unlock];
+    return shouldEmit;
+}
 
 static void VCMAppendRenderDiagnostic(NSString *message) {
     if (![message isKindOfClass:[NSString class]] || message.length == 0) return;
-    mkdir("/var/mobile/Documents", 0755);
-    int fd = open("/var/mobile/Documents/VCam-OrientationDiag.log",
-                  O_WRONLY | O_CREAT | O_APPEND, 0644);
-    if (fd < 0) {
-        NSLog(@"[VCam Pro/OrientationDiag] No se pudo abrir el archivo de diagnóstico: %s", strerror(errno));
-        return;
-    }
-    NSString *line = [message stringByAppendingString:@"\n"];
-    NSData *data = [line dataUsingEncoding:NSUTF8StringEncoding];
-    const uint8_t *bytes = data.bytes;
-    size_t remaining = data.length;
-    while (remaining > 0) {
-        ssize_t written = write(fd, bytes, remaining);
-        if (written < 0) {
-            if (errno == EINTR) continue;
-            break;
-        }
-        if (written == 0) break;
-        bytes += written;
-        remaining -= (size_t)written;
-    }
-    close(fd);
+    VCMReportOrientationDiagnostic(message);
 }
 
 static BOOL VCMWriteAll(int fd, const void *bytes, size_t length) {
@@ -982,12 +977,12 @@ static void VCMSharedStateDidChange(CFNotificationCenterRef center,
     }
     if (!sourceImage) return NULL;
 
-    uint32_t renderDiagnostic = atomic_fetch_add_explicit(
-        &g_vcmRenderDiagnosticCount, 1, memory_order_relaxed);
-    if (renderDiagnostic < 24) {
+    if (VCMShouldEmitRenderDiagnostic()) {
+        uint32_t renderDiagnostic = atomic_fetch_add_explicit(
+            &g_vcmRenderDiagnosticCount, 1, memory_order_relaxed) + 1;
         NSString *diagnostic = [NSString stringWithFormat:
-            @"[VCam Pro/OrientationDiag] render #%u media=%@ source=%.1fx%.1f target=%zux%zu rotation=%ld mirror=%d preferred=[%.3f %.3f %.3f %.3f %.3f %.3f]",
-            renderDiagnostic + 1,
+            @"[VCam Pro/LiveDiag] RENDER #%u media=%@ source=%.1fx%.1f target=%zux%zu rotation=%ld mirror=%d zoom=%.2f offset=(%.3f,%.3f) preferred=[%.3f %.3f %.3f %.3f %.3f %.3f]",
+            renderDiagnostic,
             videoMode ? @"video" : @"image",
             sourceImage.extent.size.width,
             sourceImage.extent.size.height,
@@ -995,6 +990,7 @@ static void VCMSharedStateDidChange(CFNotificationCenterRef center,
             CVPixelBufferGetHeight(templateBuffer),
             (long)rotationDegrees,
             mirrorEnabled,
+            zoom, offsetX, offsetY,
             preferredTransform.a, preferredTransform.b,
             preferredTransform.c, preferredTransform.d,
             preferredTransform.tx, preferredTransform.ty];
