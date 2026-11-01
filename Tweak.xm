@@ -6,6 +6,7 @@
 #import <ImageIO/ImageIO.h>
 #import <QuartzCore/QuartzCore.h>
 #import <objc/runtime.h>
+#import <objc/message.h>
 #import <arpa/inet.h>
 #import <errno.h>
 #import <netinet/in.h>
@@ -62,11 +63,24 @@ static CIContext *g_previewCIContext = nil;
 static dispatch_source_t g_previewPumpTimer = nil;
 static CFTimeInterval g_lastVideoOutputCallbackTime = 0.0;
 static const void *kVCamPreviewOverlayKey = &kVCamPreviewOverlayKey;
+static const void *kVCamPreviewOverlayContextKey = &kVCamPreviewOverlayContextKey;
+
+@interface VCamPreviewOverlayContext : NSObject
+@property (nonatomic, weak) AVCaptureVideoPreviewLayer *previewLayer;
+@property (nonatomic, strong) CALayer *contentLayer;
+@property (nonatomic) CGFloat sourceRotationDegrees;
+@property (nonatomic) BOOL sourceMirrored;
+@end
+
+@implementation VCamPreviewOverlayContext
+@end
 
 static void VCamAttachPreviewOverlay(AVCaptureVideoPreviewLayer *previewLayer);
-static void VCamUpdatePreviewOverlaysWithSampleBuffer(CMSampleBufferRef sampleBuffer);
+static void VCamUpdatePreviewOverlaysWithSampleBuffer(CMSampleBufferRef sampleBuffer,
+                                                       AVCaptureConnection *sourceConnection);
 static void VCamUpdatePreviewOverlaysWithJPEG(NSData *jpegData);
 static void VCamSetPreviewOverlaysVisible(BOOL visible);
+static void VCamRefreshPreviewOverlayTransforms(void);
 
 static void VCamRefreshFromServer(void);
 static void VCamCreateOverlay(void);
@@ -478,14 +492,140 @@ static void VCamRegisterIPCObserver(void) {
 
 #pragma mark - Preview Layer Bridge
 
-static void VCamSetPreviewOverlayContents(CGImageRef image) {
+static CGFloat VCamNormalizeRotationDegrees(CGFloat degrees) {
+    if (!isfinite(degrees)) return 0.0;
+    CGFloat normalized = fmod(degrees, 360.0);
+    if (normalized < 0.0) normalized += 360.0;
+
+    // Remove floating-point noise around cardinal orientations while keeping
+    // non-cardinal horizon-level values intact.
+    CGFloat nearestCardinal = round(normalized / 90.0) * 90.0;
+    if (fabs(normalized - nearestCardinal) < 0.25 ||
+        fabs(360.0 - normalized) < 0.25) {
+        normalized = fmod(nearestCardinal, 360.0);
+    }
+    return normalized;
+}
+
+static CGFloat VCamConnectionRotationDegrees(AVCaptureConnection *connection) {
+    if (!connection) return 0.0;
+
+    // iOS 17+: read the current angle without changing the capture connection.
+    // Resolve it dynamically because CI builds use the iOS 16.5 SDK.
+    SEL rotationSelector = NSSelectorFromString(@"videoRotationAngle");
+    if ([connection respondsToSelector:rotationSelector]) {
+        CGFloat (*getter)(id, SEL) = (CGFloat (*)(id, SEL))objc_msgSend;
+        return VCamNormalizeRotationDegrees(getter(connection, rotationSelector));
+    }
+
+    // iOS 14–16 compatibility: the legacy orientation property is still
+    // available on those releases.
+    SEL legacySelector = NSSelectorFromString(@"videoOrientation");
+    if ([connection respondsToSelector:legacySelector]) {
+        NSInteger (*getter)(id, SEL) = (NSInteger (*)(id, SEL))objc_msgSend;
+        NSInteger orientation = getter(connection, legacySelector);
+        switch (orientation) {
+            case AVCaptureVideoOrientationPortrait: return 90.0;
+            case AVCaptureVideoOrientationPortraitUpsideDown: return 270.0;
+            case AVCaptureVideoOrientationLandscapeRight: return 0.0;
+            case AVCaptureVideoOrientationLandscapeLeft: return 180.0;
+            default: break;
+        }
+    }
+
+    return 0.0;
+}
+
+static BOOL VCamConnectionIsMirrored(AVCaptureConnection *connection) {
+    if (!connection) return NO;
+
+    SEL selector = NSSelectorFromString(@"isVideoMirrored");
+    if (![connection respondsToSelector:selector]) {
+        selector = NSSelectorFromString(@"videoMirrored");
+    }
+    if (![connection respondsToSelector:selector]) return NO;
+
+    BOOL (*getter)(id, SEL) = (BOOL (*)(id, SEL))objc_msgSend;
+    return getter(connection, selector);
+}
+
+static CGFloat VCamShortestRotationDelta(CGFloat sourceDegrees, CGFloat targetDegrees) {
+    CGFloat delta = fmod((targetDegrees - sourceDegrees) + 540.0, 360.0) - 180.0;
+    return fabs(delta) < 0.25 ? 0.0 : delta;
+}
+
+static void VCamUpdatePreviewOverlayLayout(CALayer *overlay) {
+    if (!overlay) return;
+
+    VCamPreviewOverlayContext *context =
+        objc_getAssociatedObject(overlay, kVCamPreviewOverlayContextKey);
+    if (!context) return;
+
+    AVCaptureVideoPreviewLayer *previewLayer = context.previewLayer;
+    CGRect previewBounds = previewLayer ? previewLayer.bounds : overlay.bounds;
+    CGFloat width = CGRectGetWidth(previewBounds);
+    CGFloat height = CGRectGetHeight(previewBounds);
+    if (width <= 0.0 || height <= 0.0) return;
+
+    AVCaptureConnection *previewConnection = previewLayer.connection;
+    CGFloat previewRotation = VCamConnectionRotationDegrees(previewConnection);
+    CGFloat deltaRotation = VCamShortestRotationDelta(context.sourceRotationDegrees,
+                                                       previewRotation);
+    BOOL deltaMirroring = context.sourceMirrored !=
+        VCamConnectionIsMirrored(previewConnection);
+
+    CGFloat radians = deltaRotation * (CGFloat)M_PI / 180.0;
+    CGFloat absoluteCosine = fabs(cos(radians));
+    CGFloat absoluteSine = fabs(sin(radians));
+
+    // The image layer rotates inside a clipping container. Its unrotated
+    // bounds are the inverse-rotated preview rectangle, ensuring the final
+    // rotated image covers the preview without transparent corners.
+    CGFloat contentWidth = absoluteCosine * width + absoluteSine * height;
+    CGFloat contentHeight = absoluteSine * width + absoluteCosine * height;
+
+    [CATransaction begin];
+    [CATransaction setDisableActions:YES];
+
+    overlay.bounds = CGRectMake(0.0, 0.0, width, height);
+    overlay.position = CGPointMake(CGRectGetMidX(previewBounds),
+                                   CGRectGetMidY(previewBounds));
+
+    CALayer *contentLayer = context.contentLayer;
+    contentLayer.bounds = CGRectMake(0.0, 0.0, contentWidth, contentHeight);
+    contentLayer.position = CGPointMake(width * 0.5, height * 0.5);
+
+    CATransform3D transform = CATransform3DMakeRotation(radians, 0.0, 0.0, 1.0);
+    if (deltaMirroring) {
+        // Reflect in final preview coordinates, after applying the rotation.
+        transform = CATransform3DConcat(
+            CATransform3DMakeScale(-1.0, 1.0, 1.0),
+            transform);
+    }
+    contentLayer.transform = transform;
+
+    [CATransaction commit];
+}
+
+static void VCamSetPreviewOverlayContents(CGImageRef image,
+                                          CGFloat sourceRotationDegrees,
+                                          BOOL sourceMirrored) {
     if (!image) return;
     CGImageRef retainedImage = CGImageRetain(image);
+    CGFloat normalizedSourceRotation = VCamNormalizeRotationDegrees(sourceRotationDegrees);
+
     dispatch_async(dispatch_get_main_queue(), ^{
         NSArray<CALayer *> *layers = g_previewOverlayLayers.allObjects ?: @[];
-        for (CALayer *layer in layers) {
-            layer.contents = (__bridge id)retainedImage;
-            layer.hidden = NO;
+        for (CALayer *overlay in layers) {
+            VCamPreviewOverlayContext *context =
+                objc_getAssociatedObject(overlay, kVCamPreviewOverlayContextKey);
+            if (!context || !context.contentLayer) continue;
+
+            context.sourceRotationDegrees = normalizedSourceRotation;
+            context.sourceMirrored = sourceMirrored;
+            VCamUpdatePreviewOverlayLayout(overlay);
+            context.contentLayer.contents = (__bridge id)retainedImage;
+            overlay.hidden = NO;
         }
         CGImageRelease(retainedImage);
     });
@@ -500,10 +640,23 @@ static void VCamSetPreviewOverlaysVisible(BOOL visible) {
     });
 }
 
-static void VCamUpdatePreviewOverlaysWithSampleBuffer(CMSampleBufferRef sampleBuffer) {
+static void VCamRefreshPreviewOverlayTransforms(void) {
+    dispatch_async(dispatch_get_main_queue(), ^{
+        NSArray<CALayer *> *layers = g_previewOverlayLayers.allObjects ?: @[];
+        for (CALayer *overlay in layers) {
+            VCamUpdatePreviewOverlayLayout(overlay);
+        }
+    });
+}
+
+static void VCamUpdatePreviewOverlaysWithSampleBuffer(CMSampleBufferRef sampleBuffer,
+                                                       AVCaptureConnection *sourceConnection) {
     if (!sampleBuffer || !VCamIsEnabled()) return;
     CVImageBufferRef imageBuffer = CMSampleBufferGetImageBuffer(sampleBuffer);
     if (!imageBuffer) return;
+
+    CGFloat sourceRotation = VCamConnectionRotationDegrees(sourceConnection);
+    BOOL sourceMirrored = VCamConnectionIsMirrored(sourceConnection);
 
     static dispatch_once_t onceToken;
     dispatch_once(&onceToken, ^{
@@ -516,14 +669,14 @@ static void VCamUpdatePreviewOverlaysWithSampleBuffer(CMSampleBufferRef sampleBu
 
     CGImageRef cgImage = [g_previewCIContext createCGImage:image fromRect:extent];
     if (!cgImage) return;
-    VCamSetPreviewOverlayContents(cgImage);
+    VCamSetPreviewOverlayContents(cgImage, sourceRotation, sourceMirrored);
     CGImageRelease(cgImage);
 }
 
 static void VCamUpdatePreviewOverlaysWithJPEG(NSData *jpegData) {
     if (!jpegData.length || !VCamIsEnabled()) return;
     UIImage *image = [UIImage imageWithData:jpegData];
-    if (image.CGImage) VCamSetPreviewOverlayContents(image.CGImage);
+    if (image.CGImage) VCamSetPreviewOverlayContents(image.CGImage, 0.0, NO);
 }
 
 static void VCamStartPreviewPump(void);
@@ -542,7 +695,8 @@ static void VCamRenderPixelBufferToPreview(CVPixelBufferRef pixelBuffer) {
 
     CGImageRef cgImage = [g_previewCIContext createCGImage:image fromRect:extent];
     if (!cgImage) return;
-    VCamSetPreviewOverlayContents(cgImage);
+    // Preview-pump frames are local and have no AVCaptureConnection angle.
+    VCamSetPreviewOverlayContents(cgImage, 0.0, NO);
     CGImageRelease(cgImage);
 }
 
@@ -599,16 +753,34 @@ static void VCamAttachPreviewOverlay(AVCaptureVideoPreviewLayer *previewLayer) {
     if (!previewLayer) return;
     dispatch_async(dispatch_get_main_queue(), ^{
         CALayer *existing = objc_getAssociatedObject(previewLayer, kVCamPreviewOverlayKey);
-        if (existing) return;
+        if (existing) {
+            VCamUpdatePreviewOverlayLayout(existing);
+            return;
+        }
 
         CALayer *overlay = [CALayer layer];
         overlay.name = @"VCamPro.VirtualPreview";
-        overlay.frame = previewLayer.bounds;
-        overlay.contentsGravity = kCAGravityResizeAspectFill;
-        overlay.contentsScale = [UIScreen mainScreen].scale;
+        overlay.anchorPoint = CGPointMake(0.5, 0.5);
         overlay.masksToBounds = YES;
         overlay.zPosition = CGFLOAT_MAX;
         overlay.hidden = !VCamIsEnabled();
+
+        CALayer *contentLayer = [CALayer layer];
+        contentLayer.name = @"VCamPro.VirtualPreview.Content";
+        contentLayer.anchorPoint = CGPointMake(0.5, 0.5);
+        contentLayer.contentsGravity = kCAGravityResizeAspectFill;
+        contentLayer.contentsScale = [UIScreen mainScreen].scale;
+        [overlay addSublayer:contentLayer];
+
+        VCamPreviewOverlayContext *context = [[VCamPreviewOverlayContext alloc] init];
+        context.previewLayer = previewLayer;
+        context.contentLayer = contentLayer;
+        context.sourceRotationDegrees = 0.0;
+        context.sourceMirrored = NO;
+        objc_setAssociatedObject(overlay,
+                                 kVCamPreviewOverlayContextKey,
+                                 context,
+                                 OBJC_ASSOCIATION_RETAIN_NONATOMIC);
 
         [previewLayer addSublayer:overlay];
         objc_setAssociatedObject(previewLayer,
@@ -620,6 +792,8 @@ static void VCamAttachPreviewOverlay(AVCaptureVideoPreviewLayer *previewLayer) {
             g_previewOverlayLayers = [NSHashTable weakObjectsHashTable];
         }
         [g_previewOverlayLayers addObject:overlay];
+
+        VCamUpdatePreviewOverlayLayout(overlay);
 
         if (VCamIsEnabled() && [MediaManager sharedManager].mode == VCamMediaModePhoto) {
             NSData *stillJPEG = [[MediaManager sharedManager] nextPhotoData];
@@ -730,7 +904,7 @@ static void VCamAttachPreviewOverlay(AVCaptureVideoPreviewLayer *previewLayer) {
         return;
     }
 
-    VCamUpdatePreviewOverlaysWithSampleBuffer(virtualFrame);
+    VCamUpdatePreviewOverlaysWithSampleBuffer(virtualFrame, connection);
     @synchronized ([AVCaptureVideoDataOutput class]) {
         g_vcamVideoReplacementCount += 1;
     }
@@ -800,13 +974,13 @@ static void VCamAttachPreviewOverlay(AVCaptureVideoPreviewLayer *previewLayer) {
 - (void)setBounds:(CGRect)bounds {
     %orig(bounds);
     CALayer *overlay = objc_getAssociatedObject(self, kVCamPreviewOverlayKey);
-    if (overlay) overlay.frame = self.bounds;
+    if (overlay) VCamUpdatePreviewOverlayLayout(overlay);
 }
 
 - (void)setFrame:(CGRect)frame {
     %orig(frame);
     CALayer *overlay = objc_getAssociatedObject(self, kVCamPreviewOverlayKey);
-    if (overlay) overlay.frame = self.bounds;
+    if (overlay) VCamUpdatePreviewOverlayLayout(overlay);
 }
 
 %end
@@ -1942,6 +2116,7 @@ static void VCamRegisterLifecycle(void) {
     [g_lifecycleObservers addObject:unlock];
 
     id orientation = [center addObserverForName:UIDeviceOrientationDidChangeNotification object:nil queue:[NSOperationQueue mainQueue] usingBlock:^(NSNotification *note) {
+        VCamRefreshPreviewOverlayTransforms();
         VCamClampButton();
     }];
     [g_lifecycleObservers addObject:orientation];
