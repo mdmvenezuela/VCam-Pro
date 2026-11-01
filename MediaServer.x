@@ -271,247 +271,108 @@ static VCMEmitSampleBufferFunction VCMOriginalForObject(id object, SEL selector)
     return NULL;
 }
 
-static BOOL VCMIsRenderedOrientationAttachment(const void *key) {
-    if (!key || CFGetTypeID(key) != CFStringGetTypeID()) return NO;
-    NSString *name = [(__bridge NSString *)key lowercaseString];
-
-    // The replacement pixels are already rendered upright into the camera's
-    // target dimensions. Forwarding source orientation/transform metadata makes
-    // some clients rotate those pixels a second time.
-    return [name containsString:@"orientation"] ||
-           [name containsString:@"rotation"] ||
-           [name containsString:@"transform"];
-}
-
-static void VCMCopyAttachmentEntry(const void *key,
-                                    const void *value,
-                                    void *context) {
-    if (key && value && context && !VCMIsRenderedOrientationAttachment(key)) {
-        CFDictionarySetValue((CFMutableDictionaryRef)context, key, value);
-    }
-}
-
-static void VCMRemoveRenderedOrientationAttachments(CVPixelBufferRef pixelBuffer) {
-    if (!pixelBuffer) return;
-
-    // CVBufferGetAttachments is available on the iOS 14 deployment target;
-    // CVBufferCopyAttachments is iOS 15+ and would fail the iOS 14 build.
-    CFDictionaryRef attachments = CVBufferGetAttachments(
-        pixelBuffer, kCVAttachmentMode_ShouldPropagate);
-    if (!attachments) return;
-
-    CFIndex count = CFDictionaryGetCount(attachments);
-    const void **rawKeys = count > 0 ? calloc((size_t)count, sizeof(void *)) : NULL;
-    CFMutableArrayRef keys = CFArrayCreateMutable(
-        kCFAllocatorDefault, 0, &kCFTypeArrayCallBacks);
-    if (rawKeys && keys) {
-        CFDictionaryGetKeysAndValues(attachments, rawKeys, NULL);
-        for (CFIndex index = 0; index < count; index++) {
-            if (rawKeys[index]) CFArrayAppendValue(keys, rawKeys[index]);
-        }
-        CFIndex keyCount = CFArrayGetCount(keys);
-        for (CFIndex index = 0; index < keyCount; index++) {
-            CFStringRef key = (CFStringRef)CFArrayGetValueAtIndex(keys, index);
-            if (VCMIsRenderedOrientationAttachment(key)) {
-                CVBufferRemoveAttachment(pixelBuffer, key);
-            }
-        }
-    }
-    free(rawKeys);
-    if (keys) CFRelease(keys);
-}
-
-static CMSampleBufferRef VCMCreateReplacementSampleBuffer(
-    CMSampleBufferRef originalBuffer,
-    CVPixelBufferRef replacementPixelBuffer) CF_RETURNS_RETAINED {
-    if (!originalBuffer || !replacementPixelBuffer) return NULL;
-
-    // Normalize metadata at the same boundary as the already-rendered pixels.
-    VCMRemoveRenderedOrientationAttachments(replacementPixelBuffer);
-
-    // Describe the rendered buffer from its actual pixel dimensions. Reusing
-    // the camera format can retain orientation extensions in some pipelines.
-    CMVideoFormatDescriptionRef replacementDescription = NULL;
-    OSStatus formatStatus = CMVideoFormatDescriptionCreateForImageBuffer(
-        kCFAllocatorDefault,
-        replacementPixelBuffer,
-        &replacementDescription);
-    if (formatStatus != noErr || !replacementDescription) {
-        NSLog(@"[VCam Pro/MediaServer] No se pudo crear el formato del fotograma sustituido (%d).",
-              (int)formatStatus);
-        return NULL;
-    }
-
-    CMSampleTimingInfo timing = {
-        .duration = CMTimeMake(1, 30),
-        .presentationTimeStamp = CMClockGetTime(CMClockGetHostTimeClock()),
-        .decodeTimeStamp = kCMTimeInvalid
-    };
-    CMSampleTimingInfo originalTiming;
-    if (CMSampleBufferGetSampleTimingInfo(originalBuffer, 0, &originalTiming) == noErr) {
-        timing = originalTiming;
-        if (!CMTIME_IS_VALID(timing.duration) || CMTIME_IS_INDEFINITE(timing.duration)) {
-            timing.duration = CMTimeMake(1, 30);
-        }
-        if (!CMTIME_IS_VALID(timing.presentationTimeStamp) ||
-            CMTIME_IS_INDEFINITE(timing.presentationTimeStamp)) {
-            timing.presentationTimeStamp = CMClockGetTime(CMClockGetHostTimeClock());
-        }
-    }
-
-    CMSampleBufferRef replacementSampleBuffer = NULL;
-    OSStatus sampleStatus = CMSampleBufferCreateReadyWithImageBuffer(
-        kCFAllocatorDefault,
-        replacementPixelBuffer,
-        replacementDescription,
-        &timing,
-        &replacementSampleBuffer);
-    CFRelease(replacementDescription);
-
-    if (sampleStatus != noErr || !replacementSampleBuffer) {
-        NSLog(@"[VCam Pro/MediaServer] No se pudo crear el CMSampleBuffer sustituido (%d).",
-              (int)sampleStatus);
-        return NULL;
-    }
-
-    CFDictionaryRef bufferAttachments = CMCopyDictionaryOfAttachments(
-        kCFAllocatorDefault,
-        originalBuffer,
-        kCMAttachmentMode_ShouldPropagate);
-    if (bufferAttachments) {
-        CFMutableDictionaryRef safeAttachments = CFDictionaryCreateMutable(
-            kCFAllocatorDefault, 0, &kCFTypeDictionaryKeyCallBacks,
-            &kCFTypeDictionaryValueCallBacks);
-        if (safeAttachments) {
-            CFDictionaryApplyFunction(bufferAttachments, VCMCopyAttachmentEntry,
-                                      safeAttachments);
-            CMSetAttachments(replacementSampleBuffer,
-                             safeAttachments,
-                             kCMAttachmentMode_ShouldPropagate);
-            CFRelease(safeAttachments);
-        }
-        CFRelease(bufferAttachments);
-    }
-
-    CFArrayRef originalSampleAttachments =
-        CMSampleBufferGetSampleAttachmentsArray(originalBuffer, false);
-    CFArrayRef replacementSampleAttachments =
-        CMSampleBufferGetSampleAttachmentsArray(replacementSampleBuffer, true);
-    if (originalSampleAttachments && replacementSampleAttachments &&
-        CFArrayGetCount(originalSampleAttachments) > 0 &&
-        CFArrayGetCount(replacementSampleAttachments) > 0) {
-        CFDictionaryRef sourceDictionary =
-            (CFDictionaryRef)CFArrayGetValueAtIndex(originalSampleAttachments, 0);
-        CFMutableDictionaryRef destinationDictionary =
-            (CFMutableDictionaryRef)CFArrayGetValueAtIndex(replacementSampleAttachments, 0);
-        if (sourceDictionary && destinationDictionary) {
-            CFDictionaryApplyFunction(sourceDictionary,
-                                      VCMCopyAttachmentEntry,
-                                      destinationDictionary);
-        }
-    }
-
-    CVBufferSetAttachment(replacementPixelBuffer,
-                          kVCMSystemReplacementAttachment,
-                          kCFBooleanTrue,
-                          kCVAttachmentMode_ShouldPropagate);
-    CMSetAttachment(replacementSampleBuffer,
-                    kVCMSystemReplacementAttachment,
-                    kCFBooleanTrue,
-                    kCMAttachmentMode_ShouldPropagate);
-    return replacementSampleBuffer;
-}
-
 static void VCMEmitSampleBuffer(id object,
                                 SEL selector,
                                 CMSampleBufferRef sampleBuffer) {
-    // Bound per-frame autoreleased Core Image / Foundation objects during long calls.
     @autoreleasepool {
-    VCMEmitSampleBufferFunction original = VCMOriginalForObject(object, selector);
-    if (!original) {
-        NSLog(@"[VCam Pro/MediaServer] No se encontró IMP original para %@.",
-              NSStringFromClass(object_getClass(object)));
-        return;
-    }
-
-    if (!sampleBuffer) {
-        original(object, selector, sampleBuffer);
-        return;
-    }
-
-    // A frame that has already crossed this system boundary must not be
-    // transformed a second time as the media graph fans it out to other nodes.
-    if (CMGetAttachment(sampleBuffer, kVCMSystemReplacementAttachment, NULL) ==
-        kCFBooleanTrue) {
-        original(object, selector, sampleBuffer);
-        return;
-    }
-
-    CVImageBufferRef inputImageBuffer = CMSampleBufferGetImageBuffer(sampleBuffer);
-    if (!inputImageBuffer) {
-        original(object, selector, sampleBuffer);
-        return;
-    }
-
-    SEL mediaTypeSelector = sel_registerName("mediaType");
-    uint32_t mediaType = 0;
-    if ([object respondsToSelector:mediaTypeSelector]) {
-        mediaType = ((uint32_t (*)(id, SEL))objc_msgSend)(object, mediaTypeSelector);
-    }
-    if (mediaType != 'vide') {
-        original(object, selector, sampleBuffer);
-        return;
-    }
-
-    VCamMediaServerSource *source = [VCamMediaServerSource sharedSource];
-    if (![source isReplacementEnabled]) {
-        original(object, selector, sampleBuffer);
-        return;
-    }
-
-    VCMLogCameraFrameContract(object, sampleBuffer, (CVPixelBufferRef)inputImageBuffer);
-
-    CVPixelBufferRef replacementPixelBuffer =
-        [source copyReplacementPixelBufferMatching:(CVPixelBufferRef)inputImageBuffer];
-    if (!replacementPixelBuffer) {
-        uint32_t attempts = atomic_fetch_add_explicit(&g_vcmUnreplacedCount,
-                                                      1,
-                                                      memory_order_relaxed) + 1;
-        if (attempts == 1 || attempts % 300 == 0) {
-            VCMReportEngineStatus(@"hook_active_no_frame",
-                @"El hook recibe fotogramas, pero no se pudo generar un pixel buffer virtual.");
+        VCMEmitSampleBufferFunction original = VCMOriginalForObject(object, selector);
+        if (!original) {
+            NSLog(@"[VCam Pro/MediaServer] No se encontró IMP original para %@.",
+                  NSStringFromClass(object_getClass(object)));
+            return;
         }
+
+        if (!sampleBuffer) {
+            original(object, selector, sampleBuffer);
+            return;
+        }
+
+        // Fast path: a fan-out node may receive the very same sample again.
+        if (CMGetAttachment(sampleBuffer, kVCMSystemReplacementAttachment, NULL) ==
+            kCFBooleanTrue) {
+            original(object, selector, sampleBuffer);
+            return;
+        }
+
+        CVImageBufferRef inputImageBuffer = CMSampleBufferGetImageBuffer(sampleBuffer);
+        if (!inputImageBuffer) {
+            original(object, selector, sampleBuffer);
+            return;
+        }
+
+        SEL mediaTypeSelector = sel_registerName("mediaType");
+        uint32_t mediaType = 0;
+        if ([object respondsToSelector:mediaTypeSelector]) {
+            mediaType = ((uint32_t (*)(id, SEL))objc_msgSend)(object, mediaTypeSelector);
+        }
+        if (mediaType != 'vide') {
+            original(object, selector, sampleBuffer);
+            return;
+        }
+
+        VCamMediaServerSource *source = [VCamMediaServerSource sharedSource];
+        if (![source isReplacementEnabled]) {
+            original(object, selector, sampleBuffer);
+            return;
+        }
+
+        BOOL alreadyReplaced = NO;
+        BOOL replacementSucceeded = NO;
+
+        // Serialize only callers holding this exact CMSampleBuffer. Other
+        // camera frames can continue rendering concurrently.
+        @synchronized ((__bridge id)sampleBuffer) {
+            alreadyReplaced =
+                CMGetAttachment(sampleBuffer, kVCMSystemReplacementAttachment, NULL) ==
+                kCFBooleanTrue;
+
+            if (!alreadyReplaced) {
+                VCMLogCameraFrameContract(object, sampleBuffer,
+                                          (CVPixelBufferRef)inputImageBuffer);
+
+                replacementSucceeded =
+                    [source renderReplacementIntoPixelBuffer:(CVPixelBufferRef)inputImageBuffer];
+
+                if (replacementSucceeded) {
+                    // Mark the sample, not its reusable CVPixelBuffer. This
+                    // prevents duplicate work without leaving a stale marker
+                    // on a camera-pool buffer recycled for a later frame.
+                    CMSetAttachment(sampleBuffer,
+                                    kVCMSystemReplacementAttachment,
+                                    kCFBooleanTrue,
+                                    kCMAttachmentMode_ShouldPropagate);
+                }
+            }
+        }
+
+        if (!alreadyReplaced && !replacementSucceeded) {
+            uint32_t attempts = atomic_fetch_add_explicit(&g_vcmUnreplacedCount,
+                                                          1,
+                                                          memory_order_relaxed) + 1;
+            if (attempts == 1 || attempts % 300 == 0) {
+                VCMReportEngineStatus(@"hook_active_no_frame",
+                    @"El hook recibe fotogramas, pero no se pudieron renderizar los píxeles virtuales sobre el buffer original.");
+            }
+        }
+
+        if (replacementSucceeded) {
+            uint32_t count = atomic_fetch_add_explicit(&g_vcmReplacementCount,
+                                                       1,
+                                                       memory_order_relaxed) + 1;
+            if (count <= 3 || count % 600 == 0) {
+                NSLog(@"[VCam Pro/MediaServer] Fotograma sustituido in-place (#%u).", count);
+            }
+            if (count <= 3 || count % 120 == 0) {
+                VCMReportEngineStatus(@"frames_replaced",
+                    [NSString stringWithFormat:@"VCam sustituyó in-place %u fotogramas de cámara.", count]);
+            }
+        }
+
+        // Keep the original CMSampleBuffer, format description, timing and all
+        // camera/sample attachments. Only its pixel memory has been replaced.
         original(object, selector, sampleBuffer);
-        return;
-    }
-
-    CMSampleBufferRef replacementSampleBuffer =
-        VCMCreateReplacementSampleBuffer(sampleBuffer, replacementPixelBuffer);
-    CVPixelBufferRelease(replacementPixelBuffer);
-
-    if (!replacementSampleBuffer) {
-        VCMReportEngineStatus(@"sample_buffer_create_failed",
-            @"El fotograma virtual se renderizó, pero CoreMedia no pudo construir un CMSampleBuffer compatible.");
-        original(object, selector, sampleBuffer);
-        return;
-    }
-
-    uint32_t count = atomic_fetch_add_explicit(&g_vcmReplacementCount,
-                                               1,
-                                               memory_order_relaxed) + 1;
-    if (count <= 3 || count % 600 == 0) {
-        NSLog(@"[VCam Pro/MediaServer] Fotograma de cámara sustituido (#%u).", count);
-    }
-    if (count <= 3 || count % 120 == 0) {
-        VCMReportEngineStatus(@"frames_replaced",
-            [NSString stringWithFormat:@"VCam ya sustituyó %u fotogramas de cámara.", count]);
-    }
-
-    original(object, selector, replacementSampleBuffer);
-    CFRelease(replacementSampleBuffer);
     }
 }
-
 static BOOL VCMInstallClassHook(Class candidate,
                                 Class baseClass,
                                 SEL selector) {
