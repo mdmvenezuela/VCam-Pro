@@ -781,7 +781,7 @@ static BOOL VCamSendAll(int socketFD, const void *bytes, size_t length) {
         if (handle) {
             @try {
                 [handle seekToEndOfFile];
-                NSData *lineData = [[line stringByAppendingString:@"\n"] dataUsingEncoding:NSUTF8StringEncoding];
+                NSData *lineData = [[completeLine stringByAppendingString:@"\n"] dataUsingEncoding:NSUTF8StringEncoding];
                 [handle writeData:lineData];
                 [handle synchronizeFile];
                 saved = YES;
