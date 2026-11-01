@@ -798,7 +798,7 @@ static BOOL VCamSendAll(int socketFD, const void *bytes, size_t length) {
 
         NSData *responseBody = [@"{\"ok\":true}" dataUsingEncoding:NSUTF8StringEncoding];
         NSString *responseHeader = [NSString stringWithFormat:
-            @"HTTP/1.1 200 OK\\r\\nContent-Type: application/json\\r\\nContent-Length: %lu\\r\\nConnection: close\\r\\n\\r\\n",
+            @"HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: %lu\r\nConnection: close\r\n\r\n",
             (unsigned long)responseBody.length];
         VCamSendAll(clientFD, responseHeader.UTF8String, responseHeader.length);
         VCamSendAll(clientFD, responseBody.bytes, responseBody.length);
@@ -859,7 +859,7 @@ static BOOL VCamSendAll(int socketFD, const void *bytes, size_t length) {
         NSData *body = [NSJSONSerialization dataWithJSONObject:payload options:0 error:nil];
         if (!body) body = [@"{}" dataUsingEncoding:NSUTF8StringEncoding];
         NSString *responseHeader = [NSString stringWithFormat:
-            @"HTTP/1.1 200 OK\\r\\nContent-Type: application/json\\r\\nCache-Control: no-store\\r\\nContent-Length: %lu\\r\\nConnection: close\\r\\n\\r\\n",
+            @"HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nCache-Control: no-store\r\nContent-Length: %lu\r\nConnection: close\r\n\r\n",
             (unsigned long)body.length];
         if (VCamSendAll(clientFD, responseHeader.UTF8String, responseHeader.length)) {
             VCamSendAll(clientFD, body.bytes, body.length);
