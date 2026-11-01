@@ -1676,6 +1676,77 @@ static void VCamShowEngineDiagnostics(void) {
     });
 }
 
+static NSString *VCamDeviceOrientationName(UIDeviceOrientation value) {
+    switch (value) {
+        case UIDeviceOrientationPortrait: return @"portrait";
+        case UIDeviceOrientationPortraitUpsideDown: return @"portrait_upside_down";
+        case UIDeviceOrientationLandscapeLeft: return @"landscape_left";
+        case UIDeviceOrientationLandscapeRight: return @"landscape_right";
+        case UIDeviceOrientationFaceUp: return @"face_up";
+        case UIDeviceOrientationFaceDown: return @"face_down";
+        default: return @"unknown_or_flat";
+    }
+}
+
+static NSString *VCamInterfaceOrientationName(UIInterfaceOrientation value) {
+    switch (value) {
+        case UIInterfaceOrientationPortrait: return @"portrait";
+        case UIInterfaceOrientationPortraitUpsideDown: return @"portrait_upside_down";
+        case UIInterfaceOrientationLandscapeLeft: return @"landscape_left";
+        case UIInterfaceOrientationLandscapeRight: return @"landscape_right";
+        default: return @"unknown";
+    }
+}
+
+static void VCamUpdateOrientationDiagnosticContext(void) {
+    if (!g_isSpringBoardProcess) return;
+    UIApplication *application = [UIApplication sharedApplication];
+    UIDevice *device = [UIDevice currentDevice];
+    UIInterfaceOrientation interfaceOrientation = UIInterfaceOrientationUnknown;
+    NSString *sceneState = @"no_foreground_scene";
+    if (@available(iOS 13.0, *)) {
+        for (UIScene *scene in application.connectedScenes) {
+            if (![scene isKindOfClass:[UIWindowScene class]]) continue;
+            UIWindowScene *windowScene = (UIWindowScene *)scene;
+            if (windowScene.activationState == UISceneActivationStateForegroundActive) {
+                interfaceOrientation = windowScene.interfaceOrientation;
+                sceneState = @"foreground_active";
+                break;
+            }
+        }
+    }
+#pragma clang diagnostic push
+#pragma clang diagnostic ignored "-Wdeprecated-declarations"
+    if (interfaceOrientation == UIInterfaceOrientationUnknown) {
+        interfaceOrientation = application.statusBarOrientation;
+    }
+#pragma clang diagnostic pop
+    NSString *context = [NSString stringWithFormat:
+        @"timestamp=%@ deviceOrientation=%@(%ld) interfaceOrientation=%@(%ld) scene=%@ appState=%ld statusBarHidden=%@",
+        [[NSDate date] description],
+        VCamDeviceOrientationName(device.orientation), (long)device.orientation,
+        VCamInterfaceOrientationName(interfaceOrientation), (long)interfaceOrientation,
+        sceneState, (long)application.applicationState,
+        application.statusBarHidden ? @"yes" : @"no"];
+    [[VCamSharedState sharedState] updateDiagnosticOrientationContext:context];
+}
+
+static void VCamStartOrientationDiagnosticSampler(void) {
+    if (!g_isSpringBoardProcess) return;
+    UIDevice *device = [UIDevice currentDevice];
+    [device beginGeneratingDeviceOrientationNotifications];
+    VCamUpdateOrientationDiagnosticContext();
+    dispatch_source_t timer = dispatch_source_create(DISPATCH_SOURCE_TYPE_TIMER, 0, 0,
+                                                       dispatch_get_main_queue());
+    dispatch_source_set_timer(timer, dispatch_time(DISPATCH_TIME_NOW, 0),
+                              (uint64_t)(0.5 * NSEC_PER_SEC),
+                              (uint64_t)(0.1 * NSEC_PER_SEC));
+    dispatch_source_set_event_handler(timer, ^{
+        VCamUpdateOrientationDiagnosticContext();
+    });
+    dispatch_resume(timer);
+}
+
 static void VCamShowOrientationDiagnostics(void) {
     NSString *directory = @"/var/mobile/Documents";
     NSString *path = [directory stringByAppendingPathComponent:@"VCam-OrientationDiag.log"];
