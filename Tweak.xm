@@ -2058,6 +2058,7 @@ static void VCamStartOrientationDiagnosticSampler(void) {
 @property (nonatomic, strong) UILabel *titleLabel;
 @property (nonatomic, strong) UILabel *statusLabel;
 @property (nonatomic, strong) UITextView *logView;
+@property (nonatomic, strong) UIButton *copyButton;
 @property (nonatomic, strong) UIButton *clearButton;
 @property (nonatomic, strong) UIButton *pauseButton;
 @property (nonatomic, strong) UIButton *closeButton;
@@ -2122,10 +2123,12 @@ static void VCamStartOrientationDiagnosticSampler(void) {
     _statusLabel.adjustsFontSizeToFitWidth = YES;
     [_headerView addSubview:_statusLabel];
 
+    _copyButton = [self toolbarButton:@"COPIAR" action:@selector(copyTapped)];
     _clearButton = [self toolbarButton:@"LIMPIAR" action:@selector(clearTapped)];
     _pauseButton = [self toolbarButton:@"PAUSA" action:@selector(pauseTapped)];
     _closeButton = [self toolbarButton:@"×" action:@selector(closePanel)];
     _closeButton.titleLabel.font = [UIFont systemFontOfSize:20 weight:UIFontWeightRegular];
+    [_headerView addSubview:_copyButton];
     [_headerView addSubview:_clearButton];
     [_headerView addSubview:_pauseButton];
     [_headerView addSubview:_closeButton];
@@ -2159,13 +2162,18 @@ static void VCamStartOrientationDiagnosticSampler(void) {
     [super layoutSubviews];
     CGFloat width = CGRectGetWidth(self.bounds);
     CGFloat height = CGRectGetHeight(self.bounds);
-    self.headerView.frame = CGRectMake(0, 0, width, 57);
-    self.titleLabel.frame = CGRectMake(12, 5, MAX(120, width - 174), 21);
-    self.statusLabel.frame = CGRectMake(12, 29, MAX(120, width - 174), 17);
-    self.clearButton.frame = CGRectMake(width - 156, 13, 52, 30);
-    self.pauseButton.frame = CGRectMake(width - 98, 13, 52, 30);
-    self.closeButton.frame = CGRectMake(width - 40, 13, 32, 30);
-    self.logView.frame = CGRectMake(9, 64, width - 18, MAX(80, height - 73));
+    self.headerView.frame = CGRectMake(0, 0, width, 79);
+    self.titleLabel.frame = CGRectMake(12, 4, width - 24, 17);
+    self.statusLabel.frame = CGRectMake(12, 21, width - 24, 14);
+
+    // Keep all actions on a dedicated row so the copy button remains usable
+    // even on compact iPhone widths.
+    CGFloat actionY = 43.0;
+    self.copyButton.frame = CGRectMake(10, actionY, 60, 29);
+    self.clearButton.frame = CGRectMake(76, actionY, 58, 29);
+    self.pauseButton.frame = CGRectMake(140, actionY, 58, 29);
+    self.closeButton.frame = CGRectMake(width - 44, actionY, 34, 29);
+    self.logView.frame = CGRectMake(9, 86, width - 18, MAX(80, height - 95));
 }
 
 - (void)setLiveStatus:(NSString *)status connected:(BOOL)connected {
@@ -2292,6 +2300,22 @@ static void VCamStartOrientationDiagnosticSampler(void) {
                                   connected:YES];
         });
     });
+}
+
+- (void)copyTapped {
+    NSString *textToCopy = [self.logBuffer copy] ?: @"";
+    if (textToCopy.length == 0) {
+        [self setLiveStatus:@"NO HAY REGISTROS PARA COPIAR" connected:NO];
+        return;
+    }
+
+    UIPasteboard.generalPasteboard.string = textToCopy;
+    NSUInteger lineCount = [[textToCopy componentsSeparatedByString:@"\n"] count];
+    [self setLiveStatus:
+        [NSString stringWithFormat:@"COPIADO · %lu LÍNEAS · %lu CARACTERES",
+         (unsigned long)lineCount,
+         (unsigned long)textToCopy.length]
+                 connected:YES];
 }
 
 - (void)clearTapped {
