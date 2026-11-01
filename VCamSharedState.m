@@ -293,6 +293,14 @@ static BOOL VCamSendAll(int socketFD, const void *bytes, size_t length) {
     }
 }
 
+- (void)updateDiagnosticOrientationContext:(NSString *)context {
+    if (![context isKindOfClass:[NSString class]] || context.length == 0) return;
+    NSString *safeContext = context.length > 1200 ? [context substringToIndex:1200] : [context copy];
+    [_stateLock lock];
+    _diagnosticOrientationContext = safeContext;
+    [_stateLock unlock];
+}
+
 - (void)publishChange {
     CFNotificationCenterPostNotification(CFNotificationCenterGetDarwinNotifyCenter(),
                                          (__bridge CFStringRef)kVCamDarwinNotification,
