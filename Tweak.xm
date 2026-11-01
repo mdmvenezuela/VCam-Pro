@@ -1705,12 +1705,16 @@ static void VCamUpdateOrientationDiagnosticContext(void) {
     UIDevice *device = [UIDevice currentDevice];
     UIInterfaceOrientation interfaceOrientation = UIInterfaceOrientationUnknown;
     NSString *sceneState = @"no_foreground_scene";
+    NSString *statusBarHidden = @"unknown";
     if (@available(iOS 13.0, *)) {
         for (UIScene *scene in application.connectedScenes) {
             if (![scene isKindOfClass:[UIWindowScene class]]) continue;
             UIWindowScene *windowScene = (UIWindowScene *)scene;
             if (windowScene.activationState == UISceneActivationStateForegroundActive) {
                 interfaceOrientation = windowScene.interfaceOrientation;
+                if (windowScene.statusBarManager) {
+                    statusBarHidden = windowScene.statusBarManager.statusBarHidden ? @"yes" : @"no";
+                }
                 sceneState = @"foreground_active";
                 break;
             }
@@ -1727,8 +1731,7 @@ static void VCamUpdateOrientationDiagnosticContext(void) {
         [[NSDate date] description],
         VCamDeviceOrientationName(device.orientation), (long)device.orientation,
         VCamInterfaceOrientationName(interfaceOrientation), (long)interfaceOrientation,
-        sceneState, (long)application.applicationState,
-        application.statusBarHidden ? @"yes" : @"no"];
+        sceneState, (long)application.applicationState, statusBarHidden];
     [[VCamSharedState sharedState] updateDiagnosticOrientationContext:context];
 }
 
