@@ -18,9 +18,6 @@
 #import <stdatomic.h>
 
 static const uint16_t kVCamMediaServerPort = 47831;
-static NSString * const kVCamSystemReplacementAttachment =
-    @"com.vcam.pro.systemreplacement.v1";
-
 static _Atomic(uint32_t) g_vcmRenderDiagnosticCount = 0;
 
 static void VCMAppendRenderDiagnostic(NSString *message) {
@@ -928,13 +925,29 @@ static void VCMSharedStateDidChange(CFNotificationCenterRef center,
 - (CVPixelBufferRef)copyReplacementPixelBufferMatching:(CVPixelBufferRef)templateBuffer {
     if (!templateBuffer) return NULL;
 
-    OSType pixelFormat = CVPixelBufferGetPixelFormatType(templateBuffer);
+    CVPixelBufferRef replacementBuffer =
+        [self newReplacementPixelBufferWithWidth:CVPixelBufferGetWidth(templateBuffer)
+                                          height:CVPixelBufferGetHeight(templateBuffer)
+                                     pixelFormat:CVPixelBufferGetPixelFormatType(templateBuffer)];
+    if (!replacementBuffer) return NULL;
+
+    if (![self renderReplacementIntoPixelBuffer:replacementBuffer]) {
+        CVPixelBufferRelease(replacementBuffer);
+        return NULL;
+    }
+    return replacementBuffer;
+}
+
+- (BOOL)renderReplacementIntoPixelBuffer:(CVPixelBufferRef)targetBuffer {
+    if (!targetBuffer) return NO;
+
+    OSType pixelFormat = CVPixelBufferGetPixelFormatType(targetBuffer);
     BOOL supportedFormat =
         pixelFormat == kCVPixelFormatType_32BGRA ||
         pixelFormat == kCVPixelFormatType_32ARGB ||
         pixelFormat == kCVPixelFormatType_420YpCbCr8BiPlanarVideoRange ||
         pixelFormat == kCVPixelFormatType_420YpCbCr8BiPlanarFullRange;
-    if (!supportedFormat) return NULL;
+    if (!supportedFormat) return NO;
 
     CIImage *sourceImage = nil;
     VCMVideoFrame *frameToRender = nil;
@@ -980,7 +993,7 @@ static void VCMSharedStateDidChange(CFNotificationCenterRef center,
             }
         }
     }
-    if (!sourceImage) return NULL;
+    if (!sourceImage) return NO;
 
     uint32_t renderDiagnostic = atomic_fetch_add_explicit(
         &g_vcmRenderDiagnosticCount, 1, memory_order_relaxed);
@@ -991,8 +1004,8 @@ static void VCMSharedStateDidChange(CFNotificationCenterRef center,
             videoMode ? @"video" : @"image",
             sourceImage.extent.size.width,
             sourceImage.extent.size.height,
-            CVPixelBufferGetWidth(templateBuffer),
-            CVPixelBufferGetHeight(templateBuffer),
+            CVPixelBufferGetWidth(targetBuffer),
+            CVPixelBufferGetHeight(targetBuffer),
             (long)rotationDegrees,
             mirrorEnabled,
             preferredTransform.a, preferredTransform.b,
@@ -1032,12 +1045,12 @@ static void VCMSharedStateDidChange(CFNotificationCenterRef center,
         }
     }
 
-    size_t width = CVPixelBufferGetWidth(templateBuffer);
-    size_t height = CVPixelBufferGetHeight(templateBuffer);
+    size_t width = CVPixelBufferGetWidth(targetBuffer);
+    size_t height = CVPixelBufferGetHeight(targetBuffer);
     CGRect sourceExtent = sourceImage.extent;
     if (width == 0 || height == 0 ||
         CGRectIsEmpty(sourceExtent) || sourceExtent.size.width <= 0 || sourceExtent.size.height <= 0) {
-        return NULL;
+        return NO;
     }
 
     CFTimeInterval motionTime = CACurrentMediaTime();
@@ -1060,26 +1073,18 @@ static void VCMSharedStateDidChange(CFNotificationCenterRef center,
     CGRect targetBounds = CGRectMake(0, 0, width, height);
     CIImage *cropped = [positioned imageByCroppingToRect:targetBounds];
 
-    CVPixelBufferRef replacementBuffer =
-        [self newReplacementPixelBufferWithWidth:width
-                                          height:height
-                                     pixelFormat:pixelFormat];
-    if (!replacementBuffer) return NULL;
 
-    // The replacement pixels are fully rasterized into the target dimensions.
-    // Do not inherit camera-buffer attachments: some clients interpret those
-    // source orientation/transform hints after receiving the already-rendered
-    // pixels, producing a second rotation. The replacement buffer starts with
-    // neutral metadata; MediaServer.x only forwards safe sample attachments.
+    // Render into the camera-owned pixel buffer. Its original dimensions,
+    // pixel format, format description and orientation attachments are retained;
+    // Core Image writes the replacement image into the existing pixel memory.
     @try {
         [_ciContext render:cropped
-           toCVPixelBuffer:replacementBuffer
+           toCVPixelBuffer:targetBuffer
                     bounds:targetBounds
                 colorSpace:_colorSpace];
     } @catch (NSException *exception) {
         NSLog(@"[VCam Pro/MediaServer] Error renderizando fotograma: %@", exception);
-        CVPixelBufferRelease(replacementBuffer);
-        return NULL;
+        return NO;
     }
 
     if (videoMode) {
@@ -1090,7 +1095,7 @@ static void VCMSharedStateDidChange(CFNotificationCenterRef center,
         if (stillEnabled && queued < 3) [self prefetchVideoFrames];
     }
 
-    return replacementBuffer;
-}
+    return YES;
 
+}
 @end
