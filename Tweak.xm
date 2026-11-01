@@ -62,6 +62,7 @@ static const void *kVCamDelegateProxyKey = &kVCamDelegateProxyKey;
 static NSUInteger g_vcamVideoCallbackCount = 0;
 static NSUInteger g_vcamVideoReplacementCount = 0;
 static NSUInteger g_vcamClientConnectionDiagnosticCount = 0;
+static NSUInteger g_vcamClientOutputAttachDiagnosticCount = 0;
 static NSHashTable<CALayer *> *g_previewOverlayLayers = nil;
 static CIContext *g_previewCIContext = nil;
 static dispatch_source_t g_previewPumpTimer = nil;
@@ -140,24 +141,29 @@ static BOOL VCamSocketSendAll(int socketFD, const void *bytes, size_t length) {
 
 static void VCamSendOrientationDiagnosticEvent(NSString *line) {
     if (![line isKindOfClass:[NSString class]] || line.length == 0) return;
-    NSDictionary *payload = @{@"line": line};
-    NSData *body = [NSJSONSerialization dataWithJSONObject:payload options:0 error:nil];
-    if (!body || body.length > 8 * 1024) return;
+    NSString *safeLine = [line copy];
 
-    int socketFD = VCamConnectToServer();
-    if (socketFD < 0) return;
+    // Never hold up AVCapture's delegate queue for diagnostic IPC.
+    dispatch_async(dispatch_get_global_queue(QOS_CLASS_UTILITY, 0), ^{
+        NSDictionary *payload = @{@"line": safeLine};
+        NSData *body = [NSJSONSerialization dataWithJSONObject:payload options:0 error:nil];
+        if (!body || body.length > 8 * 1024) return;
 
-    struct timeval timeout = {1, 0};
-    setsockopt(socketFD, SOL_SOCKET, SO_SNDTIMEO, &timeout, sizeof(timeout));
-    setsockopt(socketFD, SOL_SOCKET, SO_RCVTIMEO, &timeout, sizeof(timeout));
+        int socketFD = VCamConnectToServer();
+        if (socketFD < 0) return;
 
-    NSString *header = [NSString stringWithFormat:
-        @"POST /orientation-diagnostic HTTP/1.1\r\nHost: 127.0.0.1\r\nContent-Type: application/json\r\nContent-Length: %lu\r\nConnection: close\r\n\r\n",
-        (unsigned long)body.length];
-    BOOL sentHeader = VCamSocketSendAll(socketFD, header.UTF8String, header.length);
-    BOOL sentBody = sentHeader && VCamSocketSendAll(socketFD, body.bytes, body.length);
-    (void)sentBody;
-    close(socketFD);
+        struct timeval timeout = {1, 0};
+        setsockopt(socketFD, SOL_SOCKET, SO_SNDTIMEO, &timeout, sizeof(timeout));
+        setsockopt(socketFD, SOL_SOCKET, SO_RCVTIMEO, &timeout, sizeof(timeout));
+
+        NSString *header = [NSString stringWithFormat:
+            @"POST /orientation-diagnostic HTTP/1.1\\r\\nHost: 127.0.0.1\\r\\nContent-Type: application/json\\r\\nContent-Length: %lu\\r\\nConnection: close\\r\\n\\r\\n",
+            (unsigned long)body.length];
+        BOOL sentHeader = VCamSocketSendAll(socketFD, header.UTF8String, header.length);
+        BOOL sentBody = sentHeader && VCamSocketSendAll(socketFD, body.bytes, body.length);
+        (void)sentBody;
+        close(socketFD);
+    });
 }
 
 static NSData *VCamHTTPGet(NSString *path) {
@@ -800,13 +806,16 @@ static void VCamLogClientConnectionOrientation(AVCaptureOutput *output,
                                 CFSTR("com.vcam.pro.systemreplacement.v1"),
                                 NULL)
         : NULL;
+    // Log the app-side connection for both marked and unmarked callbacks.
+    // A missing marker is itself useful evidence about the handoff path.
+    VCamLogClientConnectionOrientation(output,
+                                       sampleBuffer,
+                                       sampleImage,
+                                       connection,
+                                       systemMarker == kCFBooleanTrue,
+                                       pixelMarker == kCFBooleanTrue);
+
     if (systemMarker == kCFBooleanTrue || pixelMarker == kCFBooleanTrue) {
-        VCamLogClientConnectionOrientation(output,
-                                           sampleBuffer,
-                                           sampleImage,
-                                           connection,
-                                           systemMarker == kCFBooleanTrue,
-                                           pixelMarker == kCFBooleanTrue);
         [delegate captureOutput:output didOutputSampleBuffer:sampleBuffer fromConnection:connection];
         return;
     }
@@ -897,6 +906,22 @@ static void VCamLogClientConnectionOrientation(AVCaptureOutput *output,
     NSLog(@"[VCam Pro] Delegate de vídeo interceptado; formato solicitado=%@",
           format ?: @"default");
     %orig(proxy, queue);
+
+    NSUInteger attachIndex = 0;
+    @synchronized ([AVCaptureVideoDataOutput class]) {
+        if (g_vcamClientOutputAttachDiagnosticCount < 4) {
+            attachIndex = ++g_vcamClientOutputAttachDiagnosticCount;
+        }
+    }
+    if (attachIndex > 0) {
+        NSString *event = [NSString stringWithFormat:
+            @"[VCam Pro/OrientationDiag] CLIENT_VIDEO_OUTPUT_ATTACHED #%lu timestamp=%.3f output=%s pixelFormat=%@",
+            (unsigned long)attachIndex,
+            [NSDate date].timeIntervalSince1970,
+            object_getClassName(self),
+            format ?: @"default"];
+        VCamSendOrientationDiagnosticEvent(event);
+    }
 }
 
 %end
@@ -2191,6 +2216,14 @@ static void VCamRegisterLifecycle(void) {
             if (g_isSpringBoardProcess) VCamStartOrientationDiagnosticSampler();
             VCamRegisterLifecycle();
             VCamRefreshFromServer();
+
+            if (!g_isSpringBoardProcess) {
+                NSString *event = [NSString stringWithFormat:
+                    @"[VCam Pro/OrientationDiag] CLIENT_TWEAK_LOADED timestamp=%.3f uptime=%.3f",
+                    [NSDate date].timeIntervalSince1970,
+                    NSProcessInfo.processInfo.systemUptime];
+                VCamSendOrientationDiagnosticEvent(event);
+            }
 
             if ([UIApplication sharedApplication].applicationState == UIApplicationStateActive) {
                 dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.6 * NSEC_PER_SEC)),
