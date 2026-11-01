@@ -322,7 +322,7 @@ static BOOL VCamSendAll(int socketFD, const void *bytes, size_t length) {
         }
         @try {
             [handle seekToEndOfFile];
-            NSData *lineData = [[safeEvent stringByAppendingString:@"\\n"] dataUsingEncoding:NSUTF8StringEncoding];
+            NSData *lineData = [[safeEvent stringByAppendingString:@"\n"] dataUsingEncoding:NSUTF8StringEncoding];
             [handle writeData:lineData];
             [handle synchronizeFile];
             [handle closeFile];
