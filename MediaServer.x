@@ -95,6 +95,8 @@ static NSString *VCMDescribeDictionaryKeys(CFDictionaryRef dictionary) {
     return [NSString stringWithFormat:@"[%@]", [names componentsJoinedByString:@","]];
 }
 
+static BOOL VCMSendStatusBytes(int fd, const void *bytes, size_t length);
+
 static void VCMSendOrientationDiagnostic(NSString *diagnostic) {
     if (![diagnostic isKindOfClass:[NSString class]] || diagnostic.length == 0) return;
     NSDictionary *payload = @{@"line": diagnostic};
