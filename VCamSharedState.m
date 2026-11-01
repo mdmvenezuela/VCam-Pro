@@ -767,7 +767,7 @@ static BOOL VCamSendAll(int socketFD, const void *bytes, size_t length) {
         if (handle) {
             @try {
                 [handle seekToEndOfFile];
-                NSData *lineData = [[line stringByAppendingString:@"\\n"] dataUsingEncoding:NSUTF8StringEncoding];
+                NSData *lineData = [[line stringByAppendingString:@"\n"] dataUsingEncoding:NSUTF8StringEncoding];
                 [handle writeData:lineData];
                 [handle synchronizeFile];
                 saved = YES;
@@ -783,9 +783,9 @@ static BOOL VCamSendAll(int socketFD, const void *bytes, size_t length) {
             return;
         }
 
-        NSData *responseBody = [@"{\\\"ok\\\":true}" dataUsingEncoding:NSUTF8StringEncoding];
+        NSData *responseBody = [@"{\"ok\":true}" dataUsingEncoding:NSUTF8StringEncoding];
         NSString *responseHeader = [NSString stringWithFormat:
-            @"HTTP/1.1 200 OK\\r\\nContent-Type: application/json\\r\\nContent-Length: %lu\\r\\nConnection: close\\r\\n\\r\\n",
+            @"HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: %lu\r\nConnection: close\r\n\r\n",
             (unsigned long)responseBody.length];
         VCamSendAll(clientFD, responseHeader.UTF8String, responseHeader.length);
         VCamSendAll(clientFD, responseBody.bytes, responseBody.length);
