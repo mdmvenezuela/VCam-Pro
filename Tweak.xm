@@ -34,6 +34,9 @@ static BOOL g_isSpringBoardProcess = NO;
 static dispatch_source_t g_orientationDiagnosticTimer = nil;
 static NSInteger g_lastDiagnosticDeviceOrientation = NSIntegerMin;
 static NSInteger g_lastDiagnosticInterfaceOrientation = NSIntegerMin;
+static NSInteger g_lastClientDeviceOrientation = NSIntegerMin;
+static NSInteger g_lastClientInterfaceOrientation = NSIntegerMin;
+static CFTimeInterval g_lastClientOrientationDiagnosticTime = 0.0;
 static BOOL g_vcamEnabled = NO;
 static CGFloat g_vcamZoom = 1.0;
 static CGFloat g_vcamOffsetX = 0.0;
@@ -1941,18 +1944,87 @@ static void VCamUpdateOrientationDiagnosticContext(void) {
     }
 }
 
+static void VCamUpdateClientOrientationDiagnosticContext(void) {
+    if (g_isSpringBoardProcess) return;
+
+    UIApplication *application = [UIApplication sharedApplication];
+    UIDevice *device = [UIDevice currentDevice];
+    UIInterfaceOrientation interfaceOrientation = UIInterfaceOrientationUnknown;
+    NSString *sceneState = @"no_foreground_scene";
+    NSString *statusBarHidden = @"unknown";
+
+    if (@available(iOS 13.0, *)) {
+        for (UIScene *scene in application.connectedScenes) {
+            if (![scene isKindOfClass:[UIWindowScene class]]) continue;
+            UIWindowScene *windowScene = (UIWindowScene *)scene;
+            if (windowScene.activationState == UISceneActivationStateForegroundActive) {
+                interfaceOrientation = windowScene.interfaceOrientation;
+                if (windowScene.statusBarManager) {
+                    statusBarHidden = windowScene.statusBarManager.statusBarHidden ? @"yes" : @"no";
+                }
+                sceneState = @"foreground_active";
+                break;
+            }
+        }
+    }
+#pragma clang diagnostic push
+#pragma clang diagnostic ignored "-Wdeprecated-declarations"
+    if (interfaceOrientation == UIInterfaceOrientationUnknown) {
+        interfaceOrientation = application.statusBarOrientation;
+    }
+#pragma clang diagnostic pop
+
+    NSInteger deviceValue = (NSInteger)device.orientation;
+    NSInteger interfaceValue = (NSInteger)interfaceOrientation;
+    CFTimeInterval now = NSProcessInfo.processInfo.systemUptime;
+    BOOL changed = deviceValue != g_lastClientDeviceOrientation ||
+                   interfaceValue != g_lastClientInterfaceOrientation;
+    BOOL heartbeat = (now - g_lastClientOrientationDiagnosticTime) >= 0.8;
+    if (!changed && !heartbeat) return;
+
+    NSString *bundleID = NSBundle.mainBundle.bundleIdentifier ?: @"unknown.bundle";
+    NSString *processName = NSProcessInfo.processInfo.processName ?: @"unknown-process";
+    CGRect screenBounds = UIScreen.mainScreen.bounds;
+    NSString *event = [NSString stringWithFormat:
+        @"[VCam Pro/LiveDiag] CLIENT_ORIENTATION_CONTEXT timestamp=%.3f uptime=%.3f app=%@ process=%@ deviceOrientation=%@(%ld)%@ interfaceOrientation=%@(%ld)%@ scene=%@ appState=%ld statusBarHidden=%@ screen=%.0fx%.0f",
+        [NSDate date].timeIntervalSince1970,
+        now,
+        bundleID,
+        processName,
+        VCamDeviceOrientationName(device.orientation), (long)device.orientation,
+        deviceValue != g_lastClientDeviceOrientation ? @" [changed]" : @"",
+        VCamInterfaceOrientationName(interfaceOrientation), (long)interfaceOrientation,
+        interfaceValue != g_lastClientInterfaceOrientation ? @" [changed]" : @"",
+        sceneState,
+        (long)application.applicationState,
+        statusBarHidden,
+        screenBounds.size.width,
+        screenBounds.size.height];
+    VCamSendOrientationDiagnosticEvent(event);
+    g_lastClientDeviceOrientation = deviceValue;
+    g_lastClientInterfaceOrientation = interfaceValue;
+    g_lastClientOrientationDiagnosticTime = now;
+}
+
 static void VCamStartOrientationDiagnosticSampler(void) {
-    if (!g_isSpringBoardProcess) return;
     UIDevice *device = [UIDevice currentDevice];
     [device beginGeneratingDeviceOrientationNotifications];
-    VCamUpdateOrientationDiagnosticContext();
+
+    if (g_isSpringBoardProcess) {
+        VCamUpdateOrientationDiagnosticContext();
+    } else {
+        VCamUpdateClientOrientationDiagnosticContext();
+    }
+
     g_orientationDiagnosticTimer = dispatch_source_create(DISPATCH_SOURCE_TYPE_TIMER, 0, 0,
                                                             dispatch_get_main_queue());
-    dispatch_source_set_timer(g_orientationDiagnosticTimer, dispatch_time(DISPATCH_TIME_NOW, 0),
-                              (uint64_t)(0.5 * NSEC_PER_SEC),
-                              (uint64_t)(0.1 * NSEC_PER_SEC));
+    dispatch_source_set_timer(g_orientationDiagnosticTimer,
+                              dispatch_time(DISPATCH_TIME_NOW, 0),
+                              (uint64_t)(0.25 * NSEC_PER_SEC),
+                              (uint64_t)(0.05 * NSEC_PER_SEC));
     dispatch_source_set_event_handler(g_orientationDiagnosticTimer, ^{
-        VCamUpdateOrientationDiagnosticContext();
+        if (g_isSpringBoardProcess) VCamUpdateOrientationDiagnosticContext();
+        else VCamUpdateClientOrientationDiagnosticContext();
     });
     dispatch_resume(g_orientationDiagnosticTimer);
 }
@@ -2517,7 +2589,7 @@ static void VCamRegisterLifecycle(void) {
         }
 
         dispatch_async(dispatch_get_main_queue(), ^{
-            if (g_isSpringBoardProcess) VCamStartOrientationDiagnosticSampler();
+            VCamStartOrientationDiagnosticSampler();
             VCamRegisterLifecycle();
             VCamRefreshFromServer();
 
