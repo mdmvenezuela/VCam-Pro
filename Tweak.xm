@@ -62,6 +62,7 @@ static const void *kVCamDelegateProxyKey = &kVCamDelegateProxyKey;
 static NSUInteger g_vcamVideoCallbackCount = 0;
 static NSUInteger g_vcamVideoReplacementCount = 0;
 static NSUInteger g_vcamClientConnectionDiagnosticCount = 0;
+static NSMutableDictionary<NSString *, NSDictionary *> *g_vcamClientConnectionDiagnostics = nil;
 static NSUInteger g_vcamClientOutputAttachDiagnosticCount = 0;
 static NSHashTable<CALayer *> *g_previewOverlayLayers = nil;
 static CIContext *g_previewCIContext = nil;
@@ -670,12 +671,6 @@ static void VCamLogClientConnectionOrientation(AVCaptureOutput *output,
                                                 AVCaptureConnection *connection,
                                                 BOOL sampleMarker,
                                                 BOOL pixelMarker) {
-    NSUInteger index = 0;
-    @synchronized ([AVCaptureVideoDataOutput class]) {
-        if (g_vcamClientConnectionDiagnosticCount >= 8) return;
-        index = ++g_vcamClientConnectionDiagnosticCount;
-    }
-
     NSInteger connectionOrientation = NSIntegerMin;
     BOOL orientationSupported = NO;
     BOOL orientationSupportAvailable = NO;
@@ -729,14 +724,51 @@ static void VCamLogClientConnectionOrientation(AVCaptureOutput *output,
 
     size_t width = pixelBuffer ? CVPixelBufferGetWidth(pixelBuffer) : 0;
     size_t height = pixelBuffer ? CVPixelBufferGetHeight(pixelBuffer) : 0;
+    OSType pixelFormat = pixelBuffer ? CVPixelBufferGetPixelFormatType(pixelBuffer) : 0;
     double presentationTime = sampleBuffer
         ? CMTimeGetSeconds(CMSampleBufferGetPresentationTimeStamp(sampleBuffer)) : 0.0;
+    NSString *bundleID = NSBundle.mainBundle.bundleIdentifier ?: @"unknown.bundle";
+    NSString *processName = NSProcessInfo.processInfo.processName ?: @"unknown-process";
+    NSString *connectionKey = [NSString stringWithFormat:@"%p/%p", output, connection];
+    NSString *signature = [NSString stringWithFormat:
+        @"ui=%ld;vo=%ld;vos=%d;voa=%d;angle=%.1f;angleAvailable=%d;mirror=%d;mirrorSupported=%d;frame=%zux%zu;format=%u;sample=%d;pixel=%d",
+        (long)interfaceOrientation, (long)connectionOrientation,
+        orientationSupported, orientationSupportAvailable,
+        rotationAngle, rotationAngleAvailable, isMirrored,
+        mirroringSupported, width, height, (unsigned int)pixelFormat,
+        sampleMarker, pixelMarker];
+
+    NSUInteger index = 0;
+    BOOL shouldEmit = NO;
+    NSTimeInterval now = NSProcessInfo.processInfo.systemUptime;
+    @synchronized ([AVCaptureVideoDataOutput class]) {
+        if (!g_vcamClientConnectionDiagnostics) {
+            g_vcamClientConnectionDiagnostics = [NSMutableDictionary dictionary];
+        }
+        NSDictionary *previous = g_vcamClientConnectionDiagnostics[connectionKey];
+        NSString *previousSignature = [previous[@"signature"] isKindOfClass:[NSString class]]
+            ? previous[@"signature"] : nil;
+        NSTimeInterval previousTime = [previous[@"time"] doubleValue];
+        BOOL changed = ![previousSignature isEqualToString:signature];
+        BOOL heartbeat = (now - previousTime) >= 0.75;
+        shouldEmit = !previous || changed || heartbeat;
+        if (shouldEmit) {
+            index = ++g_vcamClientConnectionDiagnosticCount;
+            g_vcamClientConnectionDiagnostics[connectionKey] = @{
+                @"signature": signature,
+                @"time": @(now)
+            };
+        }
+    }
+    if (!shouldEmit) return;
 
     NSString *event = [NSString stringWithFormat:
-        @"[VCam Pro/OrientationDiag] CLIENT_CONNECTION #%lu timestamp=%.3f uptime=%.3f output=%s connection=%s interfaceOrientation=%ld videoOrientation=%ld orientationSupported=%d orientationSupportAvailable=%d rotationAngle=%.1f rotationAngleAvailable=%d mirrored=%d mirroringSupported=%d mirroringSupportAvailable=%d frame=%zux%zu pts=%.6f sampleMarker=%d pixelMarker=%d",
+        @"[VCam Pro/LiveDiag] CLIENT_CONNECTION #%lu timestamp=%.3f uptime=%.3f app=%@ process=%@ output=%s connection=%s interfaceOrientation=%ld videoOrientation=%ld orientationSupported=%d orientationSupportAvailable=%d videoRotationAngle=%.1f rotationAngleAvailable=%d mirrored=%d mirroringSupported=%d mirroringSupportAvailable=%d frame=%zux%zu pixelFormat=%u pts=%.6f sampleMarker=%d pixelMarker=%d",
         (unsigned long)index,
         [NSDate date].timeIntervalSince1970,
-        NSProcessInfo.processInfo.systemUptime,
+        now,
+        bundleID,
+        processName,
         output ? object_getClassName(output) : "(null)",
         connection ? object_getClassName(connection) : "(null)",
         (long)interfaceOrientation,
@@ -750,6 +782,7 @@ static void VCamLogClientConnectionOrientation(AVCaptureOutput *output,
         mirroringSupportAvailable,
         width,
         height,
+        (unsigned int)pixelFormat,
         presentationTime,
         sampleMarker,
         pixelMarker];
