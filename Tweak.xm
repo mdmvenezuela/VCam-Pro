@@ -1742,10 +1742,10 @@ static void VCamStartOrientationDiagnosticSampler(void) {
     dispatch_source_set_timer(g_orientationDiagnosticTimer, dispatch_time(DISPATCH_TIME_NOW, 0),
                               (uint64_t)(0.5 * NSEC_PER_SEC),
                               (uint64_t)(0.1 * NSEC_PER_SEC));
-    dispatch_source_set_event_handler(timer, ^{
+    dispatch_source_set_event_handler(g_orientationDiagnosticTimer, ^{
         VCamUpdateOrientationDiagnosticContext();
     });
-    dispatch_resume(timer);
+    dispatch_resume(g_orientationDiagnosticTimer);
 }
 
 static void VCamShowOrientationDiagnostics(void) {
