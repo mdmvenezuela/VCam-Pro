@@ -25,6 +25,9 @@ NS_ASSUME_NONNULL_BEGIN
 /// Starts the localhost IPC server. Call this only from SpringBoard.
 - (BOOL)startServer;
 
+/// Receives the latest UIKit orientation snapshot from SpringBoard for frame diagnostics.
+- (void)updateDiagnosticOrientationContext:(NSString *)context;
+
 /// Imports media into SpringBoard's private container and publishes it to app processes.
 - (BOOL)importImage:(UIImage *)image error:(NSError * _Nullable * _Nullable)error;
 - (BOOL)importVideoAtURL:(NSURL *)url error:(NSError * _Nullable * _Nullable)error;
