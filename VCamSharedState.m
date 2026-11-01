@@ -100,6 +100,7 @@ static BOOL VCamSendAll(int socketFD, const void *bytes, size_t length) {
         _engineStatus = @"not_reported";
         _engineDetail = @"Esperando confirmación de mediaserverd.";
         _engineOrientationDiagnostic = @"Sin fotogramas de diagnóstico recibidos.";
+        _diagnosticOrientationContext = @"UIKit orientation context not received yet";
         _engineHooks = 0;
         _engineFrames = 0;
         _engineLastSeen = 0;
