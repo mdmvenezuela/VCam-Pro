@@ -57,6 +57,7 @@ static BOOL VCamSendAll(int socketFD, const void *bytes, size_t length) {
     NSString *_engineStatus;
     NSString *_engineDetail;
     NSString *_engineOrientationDiagnostic;
+    NSString *_diagnosticOrientationContext;
     NSUInteger _engineHooks;
     NSUInteger _engineFrames;
     NSTimeInterval _engineLastSeen;
