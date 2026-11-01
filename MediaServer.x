@@ -44,6 +44,7 @@ static _Atomic(uint32_t) g_vcmUnreplacedCount = 0;
 static const uint16_t kVCMStatusPort = 47831;
 
 static _Atomic(uint32_t) g_vcmOrientationDiagnosticCount = 0;
+static NSString *g_vcmLastOrientationDiagnostic = @"Sin fotogramas de diagnóstico recibidos.";
 
 static void VCMAppendOrientationDiagnostic(NSString *message) {
     if (![message isKindOfClass:[NSString class]] || message.length == 0) return;
@@ -133,6 +134,7 @@ static void VCMLogCameraFrameContract(id object, CMSampleBufferRef sampleBuffer,
         VCMDescribeDictionaryKeys(nonPropagated),
         VCMDescribeDictionaryKeys(sampleAttachments),
         VCMDescribeDictionaryKeys(perSampleDictionary)];
+    g_vcmLastOrientationDiagnostic = [diagnostic copy];
     NSLog(@"%@", diagnostic);
     VCMAppendOrientationDiagnostic(diagnostic);
 
@@ -171,7 +173,8 @@ void VCMReportEngineStatus(NSString *status, NSString *detail) {
             @"status": safeStatus,
             @"detail": safeDetail,
             @"hooks": @(hooks),
-            @"frames": @(frames)
+            @"frames": @(frames),
+            @"orientationDiagnostic": g_vcmLastOrientationDiagnostic ?: @"Sin diagnóstico de orientación."
         };
         NSError *jsonError = nil;
         NSData *body = [NSJSONSerialization dataWithJSONObject:payload options:0 error:&jsonError];
