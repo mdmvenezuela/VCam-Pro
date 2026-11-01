@@ -4,6 +4,7 @@ on:
   push:
     branches:
       - main
+      - experiment/in-place-pixel-buffer
     tags:
       - 'v*'
 
