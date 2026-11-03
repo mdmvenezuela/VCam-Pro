@@ -1040,25 +1040,44 @@ static void VCMSharedStateDidChange(CFNotificationCenterRef center,
         return NULL;
     }
 
+    // Keep the system media-server renderer geometrically identical to
+    // MediaManager.transformedImageLocked: MIN means aspect-fit/contain.
+    // This intentionally avoids the MAX/cover behavior that made the selected
+    // source appear incorrectly framed in some camera clients.
+    CGFloat targetWidth = (CGFloat)width;
+    CGFloat targetHeight = (CGFloat)height;
+    CGFloat fitScale = MIN(targetWidth / sourceExtent.size.width,
+                           targetHeight / sourceExtent.size.height);
+
     CFTimeInterval motionTime = CACurrentMediaTime();
-    CGFloat motionX = motionEnabled ? sin(motionTime * 0.72) * 0.0045 : 0.0;
-    CGFloat motionY = motionEnabled ? cos(motionTime * 0.55) * 0.0035 : 0.0;
     CGFloat motionScale = motionEnabled
         ? 1.018 + sin(motionTime * 0.35) * 0.002
         : 1.0;
-    CGFloat scale = MAX((CGFloat)width / sourceExtent.size.width,
-                        (CGFloat)height / sourceExtent.size.height) * zoom * motionScale;
-    CIImage *scaled = [sourceImage imageByApplyingTransform:CGAffineTransformMakeScale(scale, scale)];
+    CGFloat scale = fitScale * zoom * motionScale;
+
+    CIImage *scaled = [sourceImage imageByApplyingTransform:
+        CGAffineTransformMakeScale(scale, scale)];
     CGRect scaledExtent = scaled.extent;
-    CGFloat translateX = ((CGFloat)width - scaledExtent.size.width) * 0.5
-        + (offsetX + motionX) * width;
-    CGFloat translateY = ((CGFloat)height - scaledExtent.size.height) * 0.5
-        - (offsetY + motionY) * height;
+
+    // Match MediaManager's positive offset convention on both axes.
+    CGFloat translateX = ((targetWidth - scaledExtent.size.width) * 0.5)
+        + offsetX * targetWidth;
+    CGFloat translateY = ((targetHeight - scaledExtent.size.height) * 0.5)
+        + offsetY * targetHeight;
+
     CIImage *positioned = [scaled imageByApplyingTransform:
         CGAffineTransformMakeTranslation(translateX - scaledExtent.origin.x,
                                          translateY - scaledExtent.origin.y)];
-    CGRect targetBounds = CGRectMake(0, 0, width, height);
+    CGRect targetBounds = CGRectMake(0, 0, targetWidth, targetHeight);
     CIImage *cropped = [positioned imageByCroppingToRect:targetBounds];
+
+    // MIN can leave letterbox/pillarbox areas for different source/target
+    // aspect ratios. Fill those pixels with the same opaque black background
+    // used by MediaManager, rather than leaving transparent or stale pool data.
+    CIImage *background = [[CIImage imageWithColor:
+        [CIColor colorWithRed:0 green:0 blue:0 alpha:1]]
+        imageByCroppingToRect:targetBounds];
+    CIImage *outputImage = [cropped imageByCompositingOverImage:background];
 
     CVPixelBufferRef replacementBuffer =
         [self newReplacementPixelBufferWithWidth:width
@@ -1072,7 +1091,7 @@ static void VCMSharedStateDidChange(CFNotificationCenterRef center,
     // pixels, producing a second rotation. The replacement buffer starts with
     // neutral metadata; MediaServer.x only forwards safe sample attachments.
     @try {
-        [_ciContext render:cropped
+        [_ciContext render:outputImage
            toCVPixelBuffer:replacementBuffer
                     bounds:targetBounds
                 colorSpace:_colorSpace];
