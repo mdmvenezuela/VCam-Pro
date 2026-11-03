@@ -1029,7 +1029,12 @@ static NSData *VCamReplacementDataForPhoto(AVCapturePhoto *photo) {
         if (origSource) {
             CFDictionaryRef origProps = CGImageSourceCopyPropertiesAtIndex(origSource, 0, NULL);
             if (origProps) {
-                CFNumberRef orientationNum = (__bridge CFNumberRef)CFDictionaryGetValue(origProps, kCGImagePropertyOrientation);
+                CFTypeRef orientationRef = CFDictionaryGetValue(origProps, kCGImagePropertyOrientation);
+                if (orientationRef && CFGetTypeID(orientationRef) == CFNumberGetTypeID()) {
+                    int orientationValue = 1;
+                    CFNumberGetValue((CFNumberRef)orientationRef, kCFNumberIntType, &orientationValue);
+                    targetOrientation = (CGImagePropertyOrientation)orientationValue;
+                }
                 if (orientationNum) {
                     int orientationValue = 1;
                     CFNumberGetValue(orientationNum, kCFNumberIntType, &orientationValue);
