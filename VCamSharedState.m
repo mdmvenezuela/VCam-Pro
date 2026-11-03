@@ -804,7 +804,7 @@ static void VCamSendOrientationDiagnosticToSpringBoard(NSString *message) {
         if (![object isKindOfClass:[NSDictionary class]]) {
             NSData *responseBody = [@"Invalid capture orientation JSON" dataUsingEncoding:NSUTF8StringEncoding];
             NSString *responseHeader = [NSString stringWithFormat:
-                @"HTTP/1.1 400 Bad Request\\r\\nContent-Length: %lu\\r\\nConnection: close\\r\\n\\r\\n",
+                @"HTTP/1.1 400 Bad Request\r\nContent-Length: %lu\r\nConnection: close\r\n\r\n",
                 (unsigned long)responseBody.length];
             VCamSendAll(clientFD, responseHeader.UTF8String, responseHeader.length);
             VCamSendAll(clientFD, responseBody.bytes, responseBody.length);
@@ -819,7 +819,7 @@ static void VCamSendOrientationDiagnosticToSpringBoard(NSString *message) {
         if (orientation < -1 || orientation > 4) {
             NSData *responseBody = [@"Invalid video orientation" dataUsingEncoding:NSUTF8StringEncoding];
             NSString *responseHeader = [NSString stringWithFormat:
-                @"HTTP/1.1 400 Bad Request\\r\\nContent-Length: %lu\\r\\nConnection: close\\r\\n\\r\\n",
+                @"HTTP/1.1 400 Bad Request\r\nContent-Length: %lu\r\nConnection: close\r\n\r\n",
                 (unsigned long)responseBody.length];
             VCamSendAll(clientFD, responseHeader.UTF8String, responseHeader.length);
             VCamSendAll(clientFD, responseBody.bytes, responseBody.length);
@@ -833,9 +833,9 @@ static void VCamSendOrientationDiagnosticToSpringBoard(NSString *message) {
         _captureOutputMirrored = mirrored;
         [_stateLock unlock];
 
-        NSData *responseBody = [@"{\\\"ok\\\":true}" dataUsingEncoding:NSUTF8StringEncoding];
+        NSData *responseBody = [@"{\"ok\":true}" dataUsingEncoding:NSUTF8StringEncoding];
         NSString *responseHeader = [NSString stringWithFormat:
-            @"HTTP/1.1 200 OK\\r\\nContent-Type: application/json\\r\\nContent-Length: %lu\\r\\nConnection: close\\r\\n\\r\\n",
+            @"HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: %lu\r\nConnection: close\r\n\r\n",
             (unsigned long)responseBody.length];
         VCamSendAll(clientFD, responseHeader.UTF8String, responseHeader.length);
         VCamSendAll(clientFD, responseBody.bytes, responseBody.length);

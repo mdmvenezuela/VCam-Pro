@@ -474,7 +474,7 @@ static void VCamReportCaptureOutputOrientationValue(NSInteger orientation,
     setsockopt(socketFD, SOL_SOCKET, SO_RCVTIMEO, &timeout, sizeof(timeout));
     setsockopt(socketFD, SOL_SOCKET, SO_SNDTIMEO, &timeout, sizeof(timeout));
     NSString *header = [NSString stringWithFormat:
-        @"POST /capture-orientation HTTP/1.1\\r\\nHost: 127.0.0.1\\r\\nContent-Type: application/json\\r\\nContent-Length: %lu\\r\\nConnection: close\\r\\n\\r\\n",
+        @"POST /capture-orientation HTTP/1.1\r\nHost: 127.0.0.1\r\nContent-Type: application/json\r\nContent-Length: %lu\r\nConnection: close\r\n\r\n",
         (unsigned long)body.length];
     BOOL sent = VCamSocketSendAll(socketFD, header.UTF8String, header.length) &&
                 VCamSocketSendAll(socketFD, body.bytes, body.length);
