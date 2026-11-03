@@ -34,6 +34,51 @@ static BOOL VCamSendAll(int socketFD, const void *bytes, size_t length) {
     return YES;
 }
 
+static void VCamSendOrientationDiagnosticToSpringBoard(NSString *message) {
+    if (![message isKindOfClass:[NSString class]] || message.length == 0) return;
+
+    NSString *safeMessage = [message copy];
+    dispatch_async(dispatch_get_global_queue(QOS_CLASS_UTILITY, 0), ^{
+        NSDictionary *payload = @{ @"message": safeMessage };
+        NSError *jsonError = nil;
+        NSData *body = [NSJSONSerialization dataWithJSONObject:payload options:0 error:&jsonError];
+        if (!body || body.length == 0 || body.length > 4096) return;
+
+        int fd = socket(AF_INET, SOCK_STREAM, 0);
+        if (fd < 0) return;
+
+        int noSignal = 1;
+        setsockopt(fd, SOL_SOCKET, SO_NOSIGPIPE, &noSignal, sizeof(noSignal));
+        struct timeval timeout = {1, 0};
+        setsockopt(fd, SOL_SOCKET, SO_RCVTIMEO, &timeout, sizeof(timeout));
+        setsockopt(fd, SOL_SOCKET, SO_SNDTIMEO, &timeout, sizeof(timeout));
+
+        struct sockaddr_in address;
+        memset(&address, 0, sizeof(address));
+        address.sin_len = sizeof(address);
+        address.sin_family = AF_INET;
+        address.sin_port = htons(kVCamIPCPort);
+        address.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
+
+        if (connect(fd, (struct sockaddr *)&address, sizeof(address)) != 0) {
+            close(fd);
+            return;
+        }
+
+        NSString *requestHeader = [NSString stringWithFormat:
+            @"POST /orientation-diagnostic HTTP/1.1\\r\\n"
+             "Host: 127.0.0.1\\r\\n"
+             "Content-Type: application/json\\r\\n"
+             "Content-Length: %lu\\r\\n"
+             "Connection: close\\r\\n\\r\\n",
+            (unsigned long)body.length];
+        BOOL sent = VCamSendAll(fd, requestHeader.UTF8String, requestHeader.length) &&
+                    VCamSendAll(fd, body.bytes, body.length);
+        (void)sent;
+        close(fd);
+    });
+}
+
 @interface VCamSharedState () {
     NSRecursiveLock *_stateLock;
     dispatch_queue_t _clientQueue;
@@ -73,6 +118,10 @@ static BOOL VCamSendAll(int socketFD, const void *bytes, size_t length) {
 @end
 
 @implementation VCamSharedState
+
+- (void)appendOrientationDiagnostic:(NSString *)message {
+    VCamSendOrientationDiagnosticToSpringBoard(message);
+}
 
 + (instancetype)sharedState {
     static VCamSharedState *instance = nil;
@@ -777,6 +826,90 @@ static BOOL VCamSendAll(int socketFD, const void *bytes, size_t length) {
         NSData *responseBody = [@"{\"ok\":true}" dataUsingEncoding:NSUTF8StringEncoding];
         NSString *responseHeader = [NSString stringWithFormat:
             @"HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: %lu\r\nConnection: close\r\n\r\n",
+            (unsigned long)responseBody.length];
+        VCamSendAll(clientFD, responseHeader.UTF8String, responseHeader.length);
+        VCamSendAll(clientFD, responseBody.bytes, responseBody.length);
+        return;
+    }
+
+    if (isPOST && [requestPath isEqualToString:@"/orientation-diagnostic"]) {
+        const unsigned long long maximumDiagnosticSize = 4096;
+        if (contentLength == 0 || contentLength > maximumDiagnosticSize ||
+            initialBodyLength > contentLength) return;
+
+        NSMutableData *body = [NSMutableData dataWithBytes:initialBody length:initialBodyLength];
+        while (body.length < contentLength) {
+            size_t remaining = (size_t)(contentLength - body.length);
+            ssize_t amount = recv(clientFD, receiveBuffer,
+                                  MIN(sizeof(receiveBuffer), remaining), 0);
+            if (amount < 0) {
+                if (errno == EINTR) continue;
+                return;
+            }
+            if (amount == 0) return;
+            [body appendBytes:receiveBuffer length:(NSUInteger)amount];
+        }
+
+        NSError *jsonError = nil;
+        id object = [NSJSONSerialization JSONObjectWithData:body options:0 error:&jsonError];
+        NSString *message = [object isKindOfClass:[NSDictionary class]] &&
+                            [object[@"message"] isKindOfClass:[NSString class]]
+            ? object[@"message"] : nil;
+        if (message.length == 0 || message.length > 3000) {
+            NSData *responseBody = [@"Invalid diagnostic message" dataUsingEncoding:NSUTF8StringEncoding];
+            NSString *responseHeader = [NSString stringWithFormat:
+                @"HTTP/1.1 400 Bad Request\\r\\nContent-Length: %lu\\r\\nConnection: close\\r\\n\\r\\n",
+                (unsigned long)responseBody.length];
+            VCamSendAll(clientFD, responseHeader.UTF8String, responseHeader.length);
+            VCamSendAll(clientFD, responseBody.bytes, responseBody.length);
+            return;
+        }
+
+        const char *directory = "/var/mobile/Documents";
+        const char *path = "/var/mobile/Documents/VCam-OrientationDiag.log";
+        if (mkdir(directory, 0755) != 0 && errno != EEXIST) {
+            NSLog(@"[VCam Pro/OrientationDiag] SpringBoard no pudo crear Documents: %s", strerror(errno));
+        }
+
+        int outputFD = open(path, O_WRONLY | O_CREAT | O_APPEND, 0644);
+        if (outputFD < 0) {
+            NSLog(@"[VCam Pro/OrientationDiag] SpringBoard no pudo abrir el log: %s", strerror(errno));
+            NSData *responseBody = [@"Cannot open diagnostic log" dataUsingEncoding:NSUTF8StringEncoding];
+            NSString *responseHeader = [NSString stringWithFormat:
+                @"HTTP/1.1 500 Internal Server Error\\r\\nContent-Length: %lu\\r\\nConnection: close\\r\\n\\r\\n",
+                (unsigned long)responseBody.length];
+            VCamSendAll(clientFD, responseHeader.UTF8String, responseHeader.length);
+            VCamSendAll(clientFD, responseBody.bytes, responseBody.length);
+            return;
+        }
+
+        NSString *line = [message stringByAppendingString:@"\\n"];
+        NSData *lineData = [line dataUsingEncoding:NSUTF8StringEncoding];
+        const uint8_t *bytes = (const uint8_t *)lineData.bytes;
+        size_t remaining = lineData.length;
+        BOOL writeOK = YES;
+        while (remaining > 0) {
+            ssize_t written = write(outputFD, bytes, remaining);
+            if (written < 0) {
+                if (errno == EINTR) continue;
+                writeOK = NO;
+                break;
+            }
+            if (written == 0) {
+                writeOK = NO;
+                break;
+            }
+            bytes += written;
+            remaining -= (size_t)written;
+        }
+        fsync(outputFD);
+        close(outputFD);
+
+        NSData *responseBody = [(writeOK ? @"OK" : @"Write failed") dataUsingEncoding:NSUTF8StringEncoding];
+        NSString *responseHeader = [NSString stringWithFormat:
+            @"HTTP/1.1 %d %@\\r\\nContent-Length: %lu\\r\\nConnection: close\\r\\n\\r\\n",
+            writeOK ? 200 : 500,
+            writeOK ? @"OK" : @"Internal Server Error",
             (unsigned long)responseBody.length];
         VCamSendAll(clientFD, responseHeader.UTF8String, responseHeader.length);
         VCamSendAll(clientFD, responseBody.bytes, responseBody.length);
