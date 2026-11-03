@@ -79,7 +79,7 @@ static BOOL VCamIsEnabled(void);
 static void VCamClampButton(void);
 static void VCamShowAdjustmentPanel(void);
 static void VCamCloseAdjustmentPanel(void);
-static void VCamReportCaptureOutputOrientation(AVCaptureConnection *connection, NSString *reason);
+static void VCamReportCaptureOutputOrientation(AVCaptureConnection *connection, NSString *reason, NSString *route);
 static void VCamReportSessionOutputOrientation(AVCaptureSession *session, NSString *reason);
 
 static BOOL VCamIsEnabled(void) {
@@ -94,9 +94,56 @@ static void VCamAppendOrientationDiagnosticLine(NSString *message) {
     [[VCamSharedState sharedState] appendOrientationDiagnostic:message];
 }
 
+// Mirror the connection orientation on VCam's child overlay only.
+// This matches the established iPhone-VCAM pattern: landscape-right/left
+// preview contracts rotate the injected display layer, while portrait keeps
+// the app's own preview-layer coordinate system unchanged.
+static CGFloat VCamPreviewOverlayRotationRadians(AVCaptureConnection *connection) {
+    if (!connection) return 0.0;
+
+    SEL rotationSelector = NSSelectorFromString(@"videoRotationAngle");
+    if ([connection respondsToSelector:rotationSelector]) {
+        CGFloat (*sendCGFloat)(id, SEL) = (CGFloat (*)(id, SEL))objc_msgSend;
+        CGFloat degrees = sendCGFloat(connection, rotationSelector);
+        if (isfinite(degrees) && fabs(degrees) > 0.01) {
+            return degrees * (CGFloat)M_PI / 180.0;
+        }
+    }
+
+    switch (connection.videoOrientation) {
+        case AVCaptureVideoOrientationLandscapeRight:
+            return (CGFloat)M_PI_2;
+        case AVCaptureVideoOrientationLandscapeLeft:
+            return -(CGFloat)M_PI_2;
+        case AVCaptureVideoOrientationPortrait:
+        case AVCaptureVideoOrientationPortraitUpsideDown:
+        default:
+            return 0.0;
+    }
+}
+
+static void VCamUpdatePreviewOverlayOrientation(AVCaptureVideoPreviewLayer *previewLayer) {
+    if (!previewLayer) return;
+    CALayer *overlay = objc_getAssociatedObject(previewLayer, kVCamPreviewOverlayKey);
+    if (!overlay) return;
+
+    CGRect parentBounds = previewLayer.bounds;
+    CGFloat radians = VCamPreviewOverlayRotationRadians(previewLayer.connection);
+    BOOL quarterTurn = fabs(fabs(radians) - (CGFloat)M_PI_2) < 0.01 ||
+                       fabs(fabs(radians) - (CGFloat)(3.0 * M_PI_2)) < 0.01;
+
+    CGSize overlaySize = quarterTurn
+        ? CGSizeMake(parentBounds.size.height, parentBounds.size.width)
+        : parentBounds.size;
+    overlay.bounds = (CGRect){CGPointZero, overlaySize};
+    overlay.position = CGPointMake(CGRectGetMidX(parentBounds), CGRectGetMidY(parentBounds));
+    overlay.transform = CATransform3DMakeRotation(radians, 0.0, 0.0, 1.0);
+}
+
 static void VCamLogPreviewLayerOrientation(AVCaptureVideoPreviewLayer *previewLayer,
                                                NSString *reason) {
     if (!previewLayer) return;
+    VCamUpdatePreviewOverlayOrientation(previewLayer);
 
     AVCaptureConnection *connection = previewLayer.connection;
     AVCaptureSession *session = previewLayer.session;
@@ -431,13 +478,16 @@ static NSString *g_vcamLastCaptureOutputSignature = nil;
 static void VCamReportCaptureOutputOrientationValue(NSInteger orientation,
                                                     BOOL supported,
                                                     BOOL mirrored,
+                                                    NSString *route,
                                                     NSString *reason) {
     NSInteger normalizedOrientation =
         (supported && orientation >= 1 && orientation <= 4) ? orientation : -1;
     BOOL normalizedSupported = normalizedOrientation >= 1;
     NSString *application = NSBundle.mainBundle.bundleIdentifier ?: @"(sin bundle)";
-    NSString *signature = [NSString stringWithFormat:@"%@|%ld|%d|%d",
-        application, (long)normalizedOrientation, normalizedSupported, mirrored];
+    NSString *normalizedRoute = [@[@"videoDataOutput", @"none"] containsObject:route]
+        ? route : @"none";
+    NSString *signature = [NSString stringWithFormat:@"%@|%@|%ld|%d|%d",
+        application, normalizedRoute, (long)normalizedOrientation, normalizedSupported, mirrored];
 
     BOOL changed = NO;
     @synchronized ([AVCaptureSession class]) {
@@ -458,7 +508,8 @@ static void VCamReportCaptureOutputOrientationValue(NSInteger orientation,
         @"orientation": @(normalizedOrientation),
         @"supported": @(normalizedSupported),
         @"mirrored": @(mirrored),
-        @"application": application
+        @"application": application,
+        @"route": normalizedRoute
     };
     NSError *jsonError = nil;
     NSData *body = [NSJSONSerialization dataWithJSONObject:payload options:0 error:&jsonError];
@@ -486,14 +537,16 @@ static void VCamReportCaptureOutputOrientationValue(NSInteger orientation,
 }
 
 static void VCamReportCaptureOutputOrientation(AVCaptureConnection *connection,
-                                               NSString *reason) {
+                                               NSString *reason,
+                                               NSString *route) {
     if (!connection) {
-        VCamReportCaptureOutputOrientationValue(-1, NO, NO, reason);
+        VCamReportCaptureOutputOrientationValue(-1, NO, NO, @"none", reason);
         return;
     }
     VCamReportCaptureOutputOrientationValue((NSInteger)connection.videoOrientation,
                                             connection.isVideoOrientationSupported,
                                             connection.videoMirrored,
+                                            route,
                                             reason);
 }
 
@@ -509,12 +562,12 @@ static void VCamReportSessionOutputOrientation(AVCaptureSession *session,
         for (AVCaptureConnection *connection in output.connections) {
             NSString *mediaType = connection.inputPorts.firstObject.mediaType;
             if (mediaType.length > 0 && ![mediaType isEqualToString:AVMediaTypeVideo]) continue;
-            VCamReportCaptureOutputOrientation(connection, reason);
+            VCamReportCaptureOutputOrientation(connection, reason, @"videoDataOutput");
             return;
         }
     }
 
-    VCamReportCaptureOutputOrientationValue(-1, NO, NO, reason);
+    VCamReportCaptureOutputOrientationValue(-1, NO, NO, @"none", reason);
 }
 
 static NSData *VCamHTTPGet(NSString *path) {
@@ -985,6 +1038,7 @@ static void VCamAttachPreviewOverlay(AVCaptureVideoPreviewLayer *previewLayer) {
             g_previewOverlayLayers = [NSHashTable weakObjectsHashTable];
         }
         [g_previewOverlayLayers addObject:overlay];
+        VCamUpdatePreviewOverlayOrientation(previewLayer);
 
         if (VCamIsEnabled() && [MediaManager sharedManager].mode == VCamMediaModePhoto) {
             NSData *stillJPEG = [[MediaManager sharedManager] nextPhotoData];
@@ -1028,7 +1082,7 @@ static void VCamAttachPreviewOverlay(AVCaptureVideoPreviewLayer *previewLayer) {
 
     id<AVCaptureVideoDataOutputSampleBufferDelegate> delegate = self.originalDelegate;
     VCamLogConnectionOrientation(sampleBuffer, output, connection);
-    VCamReportCaptureOutputOrientation(connection, @"videoDataOutputDelegate");
+    VCamReportCaptureOutputOrientation(connection, @"videoDataOutputDelegate", @"videoDataOutput");
     if (!delegate) {
         NSLog(@"[VCam Pro] El delegado original de AVCaptureVideoDataOutput ya no existe.");
         return;
@@ -1145,7 +1199,7 @@ static void VCamAttachPreviewOverlay(AVCaptureVideoPreviewLayer *previewLayer) {
 
 - (void)stopRunning {
     %orig;
-    VCamReportCaptureOutputOrientationValue(-1, NO, NO, @"sessionStopRunning");
+    VCamReportCaptureOutputOrientationValue(-1, NO, NO, @"none", @"sessionStopRunning");
 }
 
 %end
@@ -1200,19 +1254,18 @@ static void VCamAttachPreviewOverlay(AVCaptureVideoPreviewLayer *previewLayer) {
 
 - (void)layoutSublayers {
     %orig;
+    VCamUpdatePreviewOverlayOrientation(self);
     VCamLogPreviewLayerOrientation(self, @"layoutSublayers");
 }
 
 - (void)setBounds:(CGRect)bounds {
     %orig(bounds);
-    CALayer *overlay = objc_getAssociatedObject(self, kVCamPreviewOverlayKey);
-    if (overlay) overlay.frame = self.bounds;
+    VCamUpdatePreviewOverlayOrientation(self);
 }
 
 - (void)setFrame:(CGRect)frame {
     %orig(frame);
-    CALayer *overlay = objc_getAssociatedObject(self, kVCamPreviewOverlayKey);
-    if (overlay) overlay.frame = self.bounds;
+    VCamUpdatePreviewOverlayOrientation(self);
 }
 
 %end
