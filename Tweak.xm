@@ -2101,19 +2101,58 @@ static void VCamShowOrientationDiagnostics(void) {
                                                    encoding:NSUTF8StringEncoding
                                                       error:nil] ?: @"";
     NSArray *lines = [contents componentsSeparatedByCharactersInSet:[NSCharacterSet newlineCharacterSet]];
-    NSUInteger start = lines.count > 14 ? lines.count - 14 : 0;
-    NSArray *lastLines = [lines subarrayWithRange:NSMakeRange(start, lines.count - start)];
-    NSString *tail = [[lastLines componentsJoinedByString:@"\n"] stringByTrimmingCharactersInSet:
-                      [NSCharacterSet whitespaceAndNewlineCharacterSet]];
-    if (tail.length > 2200) tail = [tail substringFromIndex:tail.length - 2200];
+    NSMutableArray<NSString *> *appDiagnostics = [NSMutableArray array];
+    NSMutableArray<NSString *> *renderDiagnostics = [NSMutableArray array];
+    NSMutableArray<NSString *> *systemDiagnostics = [NSMutableArray array];
+
+    for (NSString *line in lines) {
+        if (![line isKindOfClass:[NSString class]] || line.length == 0) continue;
+        if ([line containsString:@"APP_FRAME"] ||
+            [line containsString:@"APP_ROUTE"] ||
+            [line containsString:@"PREVIEW_LAYER"]) {
+            [appDiagnostics addObject:line];
+        } else if ([line containsString:@"[VCam Pro/OrientationDiag] render #"]) {
+            [renderDiagnostics addObject:line];
+        } else if ([line containsString:@"node=BWNodeOutput"]) {
+            [systemDiagnostics addObject:line];
+        }
+    }
+
+    // Keep app-level evidence separate: mediaserverd can emit many BWNodeOutput
+    // lines and otherwise push APP_FRAME / APP_ROUTE outside the copied tail.
+    NSUInteger appStart = appDiagnostics.count > 16 ? appDiagnostics.count - 16 : 0;
+    NSArray<NSString *> *lastAppDiagnostics =
+        [appDiagnostics subarrayWithRange:NSMakeRange(appStart, appDiagnostics.count - appStart)];
+    NSUInteger renderStart = renderDiagnostics.count > 4 ? renderDiagnostics.count - 4 : 0;
+    NSArray<NSString *> *lastRenderDiagnostics =
+        [renderDiagnostics subarrayWithRange:NSMakeRange(renderStart, renderDiagnostics.count - renderStart)];
+    NSUInteger systemStart = systemDiagnostics.count > 4 ? systemDiagnostics.count - 4 : 0;
+    NSArray<NSString *> *lastSystemDiagnostics =
+        [systemDiagnostics subarrayWithRange:NSMakeRange(systemStart, systemDiagnostics.count - systemStart)];
+
+    NSString *appSection = lastAppDiagnostics.count
+        ? [lastAppDiagnostics componentsJoinedByString:@"\n"]
+        : @"(No se encontraron APP_FRAME, APP_ROUTE ni PREVIEW_LAYER en el archivo.)";
+    NSString *renderSection = lastRenderDiagnostics.count
+        ? [lastRenderDiagnostics componentsJoinedByString:@"\n"]
+        : @"(Sin registros render #.)";
+    NSString *systemSection = lastSystemDiagnostics.count
+        ? [lastSystemDiagnostics componentsJoinedByString:@"\n"]
+        : @"(Sin registros BWNodeOutput.)";
 
     NSString *writeStatus = probeOK
         ? @"ESCRITURA DEL PANEL: OK"
         : [NSString stringWithFormat:@"ESCRITURA DEL PANEL: FALLÓ\n%@", writeError.localizedDescription ?: @"Error desconocido"];
     NSString *message = [NSString stringWithFormat:
-        @"%@\nRuta: %@\nArchivo: %@\nTamaño: %llu bytes\n\nÚltimas líneas:\n%@",
+        @"%@\nRuta: %@\nArchivo: %@\nTamaño: %llu bytes\n\nREGISTROS DE LA APP (%lu):\n%@\n\nRENDER (%lu):\n%@\n\nMEDIASERVERD (%lu, últimos 4):\n%@",
         writeStatus, path, [fm fileExistsAtPath:path] ? @"EXISTE" : @"NO EXISTE",
-        fileSize, tail.length ? tail : @"(sin contenido)"];
+        fileSize,
+        (unsigned long)appDiagnostics.count, appSection,
+        (unsigned long)renderDiagnostics.count, renderSection,
+        (unsigned long)systemDiagnostics.count, systemSection];
+    if (message.length > 6500) {
+        message = [message substringFromIndex:message.length - 6500];
+    }
 
     UIAlertController *alert = [UIAlertController alertControllerWithTitle:@"Diagnóstico de orientación"
                                                                    message:message
