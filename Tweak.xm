@@ -1035,11 +1035,7 @@ static NSData *VCamReplacementDataForPhoto(AVCapturePhoto *photo) {
                     CFNumberGetValue((CFNumberRef)orientationRef, kCFNumberIntType, &orientationValue);
                     targetOrientation = (CGImagePropertyOrientation)orientationValue;
                 }
-                if (orientationNum) {
-                    int orientationValue = 1;
-                    CFNumberGetValue(orientationNum, kCFNumberIntType, &orientationValue);
-                    targetOrientation = (CGImagePropertyOrientation)orientationValue;
-                }
+                
                 CFRelease(origProps);
             }
             CFRelease(origSource);
