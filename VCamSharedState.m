@@ -66,11 +66,7 @@ static void VCamSendOrientationDiagnosticToSpringBoard(NSString *message) {
         }
 
         NSString *requestHeader = [NSString stringWithFormat:
-            @"POST /orientation-diagnostic HTTP/1.1\\r\\n"
-             "Host: 127.0.0.1\\r\\n"
-             "Content-Type: application/json\\r\\n"
-             "Content-Length: %lu\\r\\n"
-             "Connection: close\\r\\n\\r\\n",
+            @"POST /orientation-diagnostic HTTP/1.1\r\nHost: 127.0.0.1\r\nContent-Type: application/json\r\nContent-Length: %lu\r\nConnection: close\r\n\r\n",
             (unsigned long)body.length];
         BOOL sent = VCamSendAll(fd, requestHeader.UTF8String, requestHeader.length) &&
                     VCamSendAll(fd, body.bytes, body.length);
@@ -858,7 +854,7 @@ static void VCamSendOrientationDiagnosticToSpringBoard(NSString *message) {
         if (message.length == 0 || message.length > 3000) {
             NSData *responseBody = [@"Invalid diagnostic message" dataUsingEncoding:NSUTF8StringEncoding];
             NSString *responseHeader = [NSString stringWithFormat:
-                @"HTTP/1.1 400 Bad Request\\r\\nContent-Length: %lu\\r\\nConnection: close\\r\\n\\r\\n",
+                @"HTTP/1.1 400 Bad Request\r\nContent-Length: %lu\r\nConnection: close\r\n\r\n",
                 (unsigned long)responseBody.length];
             VCamSendAll(clientFD, responseHeader.UTF8String, responseHeader.length);
             VCamSendAll(clientFD, responseBody.bytes, responseBody.length);
@@ -876,14 +872,14 @@ static void VCamSendOrientationDiagnosticToSpringBoard(NSString *message) {
             NSLog(@"[VCam Pro/OrientationDiag] SpringBoard no pudo abrir el log: %s", strerror(errno));
             NSData *responseBody = [@"Cannot open diagnostic log" dataUsingEncoding:NSUTF8StringEncoding];
             NSString *responseHeader = [NSString stringWithFormat:
-                @"HTTP/1.1 500 Internal Server Error\\r\\nContent-Length: %lu\\r\\nConnection: close\\r\\n\\r\\n",
+                @"HTTP/1.1 500 Internal Server Error\r\nContent-Length: %lu\r\nConnection: close\r\n\r\n",
                 (unsigned long)responseBody.length];
             VCamSendAll(clientFD, responseHeader.UTF8String, responseHeader.length);
             VCamSendAll(clientFD, responseBody.bytes, responseBody.length);
             return;
         }
 
-        NSString *line = [message stringByAppendingString:@"\\n"];
+        NSString *line = [message stringByAppendingString:@"\n"];
         NSData *lineData = [line dataUsingEncoding:NSUTF8StringEncoding];
         const uint8_t *bytes = (const uint8_t *)lineData.bytes;
         size_t remaining = lineData.length;
@@ -907,7 +903,7 @@ static void VCamSendOrientationDiagnosticToSpringBoard(NSString *message) {
 
         NSData *responseBody = [(writeOK ? @"OK" : @"Write failed") dataUsingEncoding:NSUTF8StringEncoding];
         NSString *responseHeader = [NSString stringWithFormat:
-            @"HTTP/1.1 %d %@\\r\\nContent-Length: %lu\\r\\nConnection: close\\r\\n\\r\\n",
+            @"HTTP/1.1 %d %@\r\nContent-Length: %lu\r\nConnection: close\r\n\r\n",
             writeOK ? 200 : 500,
             writeOK ? @"OK" : @"Internal Server Error",
             (unsigned long)responseBody.length];
