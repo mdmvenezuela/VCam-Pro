@@ -404,8 +404,6 @@
     }
 
     CFTimeInterval motionTime = CACurrentMediaTime();
-    CGFloat motionX = _motionEnabled ? sin(motionTime * 0.72) * 0.0045 : 0.0;
-    CGFloat motionY = _motionEnabled ? cos(motionTime * 0.55) * 0.0035 : 0.0;
     CGFloat motionScale = _motionEnabled
         ? 1.018 + sin(motionTime * 0.35) * 0.002
         : 1.0;
