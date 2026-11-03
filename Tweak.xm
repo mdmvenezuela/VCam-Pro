@@ -2150,7 +2150,8 @@ static void VCamShowOrientationDiagnostics(void) {
         if (![line isKindOfClass:[NSString class]] || line.length == 0) continue;
         if ([line containsString:@"APP_FRAME"] ||
             [line containsString:@"APP_ROUTE"] ||
-            [line containsString:@"PREVIEW_LAYER"]) {
+            [line containsString:@"PREVIEW_LAYER"] ||
+            [line containsString:@"SESSION_OUTPUT"]) {
             [appDiagnostics addObject:line];
         } else if ([line containsString:@"[VCam Pro/OrientationDiag] render #"]) {
             [renderDiagnostics addObject:line];
