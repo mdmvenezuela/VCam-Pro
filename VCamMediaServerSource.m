@@ -465,7 +465,7 @@ static void VCMSharedStateDidChange(CFNotificationCenterRef center,
         _zoom = 1.0;
         _ciContext = [CIContext contextWithOptions:@{kCIContextUseSoftwareRenderer: @NO,
                                                       kCIContextCacheIntermediates: @NO}];
-        _colorSpace = CGColorSpaceCreateDeviceRGB();
+        _colorSpace = CGColorSpaceCreateWithName(kCGColorSpaceSRGB);
     }
     return self;
 }
