@@ -120,13 +120,66 @@ static void VCamLogPreviewLayerOrientation(AVCaptureVideoPreviewLayer *previewLa
     }
 
     NSMutableArray<NSString *> *outputClasses = [NSMutableArray array];
+    NSMutableArray<NSString *> *outputContracts = [NSMutableArray array];
     for (AVCaptureOutput *output in session.outputs) {
-        [outputClasses addObject:NSStringFromClass([output class]) ?: @"(unknown)"];
+        NSString *outputClass = NSStringFromClass([output class]) ?: @"(unknown)";
+        [outputClasses addObject:outputClass];
+
+        NSArray<AVCaptureConnection *> *connections = output.connections ?: @[];
+        if (connections.count == 0) {
+            [outputContracts addObject:[NSString stringWithFormat:
+                @"output=%@ outputId=%p connections=[]", outputClass, (__bridge void *)output]];
+            continue;
+        }
+
+        for (AVCaptureConnection *outputConnection in connections) {
+            NSInteger outputOrientation = (NSInteger)outputConnection.videoOrientation;
+            BOOL outputOrientationSupported = outputConnection.isVideoOrientationSupported;
+            BOOL outputMirrored = outputConnection.videoMirrored;
+            BOOL outputMirroringSupported = outputConnection.isVideoMirroringSupported;
+            BOOL outputEnabled = YES;
+            SEL enabledSelector = NSSelectorFromString(@"isEnabled");
+            if ([outputConnection respondsToSelector:enabledSelector]) {
+                BOOL (*sendBool)(id, SEL) = (BOOL (*)(id, SEL))objc_msgSend;
+                outputEnabled = sendBool(outputConnection, enabledSelector);
+            }
+
+            CGFloat outputRotationAngle = NAN;
+            if ([outputConnection respondsToSelector:rotationSelector]) {
+                CGFloat (*sendCGFloat)(id, SEL) = (CGFloat (*)(id, SEL))objc_msgSend;
+                outputRotationAngle = sendCGFloat(outputConnection, rotationSelector);
+            }
+
+            NSString *mediaType = outputConnection.inputPorts.firstObject.mediaType ?: @"(unknown)";
+            NSString *settingsDescription = @"";
+            if ([output isKindOfClass:[AVCaptureVideoDataOutput class]]) {
+                NSDictionary *settings = ((AVCaptureVideoDataOutput *)output).videoSettings ?: @{};
+                NSNumber *pixelFormat = settings[(id)kCVPixelBufferPixelFormatTypeKey];
+                settingsDescription = [NSString stringWithFormat:@" pixelFormat=%@ alwaysDiscardsLate=%d",
+                    pixelFormat ?: @"default",
+                    ((AVCaptureVideoDataOutput *)output).alwaysDiscardsLateVideoFrames];
+            }
+
+            [outputContracts addObject:[NSString stringWithFormat:
+                @"output=%@ outputId=%p connection=%p mediaType=%@ enabled=%d orientation=%ld orientationSupported=%d mirrored=%d mirroringSupported=%d rotationAngle=%.1f%@",
+                outputClass,
+                (__bridge void *)output,
+                (__bridge void *)outputConnection,
+                mediaType,
+                outputEnabled,
+                (long)outputOrientation,
+                outputOrientationSupported,
+                outputMirrored,
+                outputMirroringSupported,
+                outputRotationAngle,
+                settingsDescription]];
+        }
     }
 
     NSString *application = NSBundle.mainBundle.bundleIdentifier ?: @"(sin bundle)";
+    NSString *outputSignature = [outputContracts componentsJoinedByString:@"|"];
     NSString *signature = [NSString stringWithFormat:
-        @"%p|%p|%d|%ld|%d|%d|%d|%.1f|%.3f|%.3f|%.3f|%.3f|%.1f|%.1f",
+        @"%p|%p|%d|%ld|%d|%d|%d|%.1f|%.3f|%.3f|%.3f|%.3f|%.1f|%.1f|%lu",
         (__bridge void *)previewLayer,
         (__bridge void *)connection,
         session.isRunning,
@@ -140,14 +193,15 @@ static void VCamLogPreviewLayerOrientation(AVCaptureVideoPreviewLayer *previewLa
         transform.m21,
         transform.m22,
         bounds.size.width,
-        bounds.size.height];
+        bounds.size.height,
+        (unsigned long)outputSignature.hash];
 
     BOOL shouldLog = NO;
     @synchronized ([AVCaptureVideoPreviewLayer class]) {
         if (!g_vcamLoggedPreviewContracts) {
             g_vcamLoggedPreviewContracts = [NSMutableSet set];
         }
-        if (g_vcamLoggedPreviewContracts.count < 32 &&
+        if (g_vcamLoggedPreviewContracts.count < 48 &&
             ![g_vcamLoggedPreviewContracts containsObject:signature]) {
             [g_vcamLoggedPreviewContracts addObject:signature];
             shouldLog = YES;
@@ -178,8 +232,12 @@ static void VCamLogPreviewLayerOrientation(AVCaptureVideoPreviewLayer *previewLa
         outputClasses];
 
     VCamAppendOrientationDiagnosticLine(diagnostic);
+    for (NSString *outputContract in outputContracts) {
+        VCamAppendOrientationDiagnosticLine(
+            [NSString stringWithFormat:@"[VCam Pro/OrientationDiag] SESSION_OUTPUT app=%@ sessionRunning=%d %@",
+             application, session.isRunning, outputContract]);
+    }
 }
-
 static void VCamLogConnectionOrientation(CMSampleBufferRef sampleBuffer,
                                          AVCaptureOutput *output,
                                          AVCaptureConnection *connection) {
