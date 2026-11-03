@@ -423,7 +423,7 @@
     CGFloat translateX = ((targetWidth - scaledExtent.size.width) * 0.5) + (_offsetX * targetWidth);
     CGFloat translateY = ((targetHeight - scaledExtent.size.height) * 0.5) + (_offsetY * targetHeight);
     
-    image = [image imageByApplyingTransform:CGAffineTransformMakeTransform(1, 0, 0, 1, translateX - scaledExtent.origin.x, translateY - scaledExtent.origin.y)];
+    image = [image imageByApplyingTransform:CGAffineTransformMakeTranslation(translateX - scaledExtent.origin.x, translateY - scaledExtent.origin.y)];
 
     CGRect targetRect = CGRectMake(0, 0, targetWidth, targetHeight);
     
