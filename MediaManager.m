@@ -409,23 +409,25 @@
     CGFloat motionScale = _motionEnabled
         ? 1.018 + sin(motionTime * 0.35) * 0.002
         : 1.0;
-    CGFloat fillScale = MAX(targetWidth / extent.size.width, targetHeight / extent.size.height);
-    CGFloat scale = fillScale * _zoom * motionScale;
+
+    // CORRECCIÓN: Usar MIN en lugar de MAX asegura que el rostro u objeto 
+    // quepa de manera uniforme dentro del área de captura sin estirarse ni alejarse de más.
+    CGFloat fitScale = MIN(targetWidth / extent.size.width, targetHeight / extent.size.height);
+    CGFloat scale = fitScale * _zoom * motionScale;
+    
     image = [image imageByApplyingTransform:CGAffineTransformMakeScale(scale, scale)];
 
     CGRect scaledExtent = image.extent;
-    CGFloat translateX = ((targetWidth - scaledExtent.size.width) * 0.5)
-        + ((_offsetX + motionX) * targetWidth);
-    CGFloat translateY = ((targetHeight - scaledExtent.size.height) * 0.5)
-        - ((_offsetY + motionY) * targetHeight);
-    image = [image imageByApplyingTransform:CGAffineTransformMakeTranslation(translateX - scaledExtent.origin.x,
-                                                                            translateY - scaledExtent.origin.y)];
+    
+    // CORRECCIÓN: Centrado simétrico alineado con los offsets del usuario
+    CGFloat translateX = ((targetWidth - scaledExtent.size.width) * 0.5) + (_offsetX * targetWidth);
+    CGFloat translateY = ((targetHeight - scaledExtent.size.height) * 0.5) + (_offsetY * targetHeight);
+    
+    image = [image imageByApplyingTransform:CGAffineTransformMakeTransform(1, 0, 0, 1, translateX - scaledExtent.origin.x, translateY - scaledExtent.origin.y)];
 
     CGRect targetRect = CGRectMake(0, 0, targetWidth, targetHeight);
-    image = [image imageByCroppingToRect:targetRect];
-
-    // Al permitir zoom por debajo de 1x, la imagen puede dejar márgenes.
-    // Los rellenamos con negro opaco para entregar un fotograma completo.
+    
+    // Fondo negro sólido para evitar bordes transparentes que confunden a los analizadores biométricos
     CIImage *background = [[CIImage imageWithColor:[CIColor colorWithRed:0 green:0 blue:0 alpha:1]]
                            imageByCroppingToRect:targetRect];
     return [image imageByCompositingOverImage:background];
