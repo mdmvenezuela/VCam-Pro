@@ -130,13 +130,21 @@
             if ([mediaType isEqualToString:@"image"]) {
                 UIImage *loadedImage = [UIImage imageWithContentsOfFile:url.path];
                 if (loadedImage.CGImage) {
-                    UIGraphicsBeginImageContextWithOptions(loadedImage.size, NO, 1.0);
-                    [loadedImage drawInRect:(CGRect){CGPointZero, loadedImage.size}];
-                    UIImage *normalizedImage = UIGraphicsGetImageFromCurrentImageContext();
-                    UIGraphicsEndImageContext();
+                    UIGraphicsBeginImageContextWithOptions(image.size, NO, image.scale);
+[image drawInRect:CGRectMake(0, 0, image.size.width, image.size.height)];
+UIImage *normalizedImage = UIGraphicsGetImageFromCurrentImageContext();
+UIGraphicsEndImageContext();
 
                     if (normalizedImage.CGImage) {
                         CIImage *ciImage = [CIImage imageWithCGImage:normalizedImage.CGImage];
+                        // Aplicar transformación según los grados configurados por el usuario
+if (g_vcamRotationDegrees == 90) {
+    ciImage = [ciImage imageByApplyingOrientation:kCGImagePropertyOrientationRight];
+} else if (g_vcamRotationDegrees == 180) {
+    ciImage = [ciImage imageByApplyingOrientation:kCGImagePropertyOrientationDown];
+} else if (g_vcamRotationDegrees == 270) {
+    ciImage = [ciImage imageByApplyingOrientation:kCGImagePropertyOrientationLeft];
+}
                         [self->_lock lock];
                         self->_stillImage = ciImage;
                         self->_mode = VCamMediaModePhoto;
