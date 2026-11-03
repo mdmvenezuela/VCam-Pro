@@ -103,6 +103,7 @@ static void VCamSendOrientationDiagnosticToSpringBoard(NSString *message) {
     NSInteger _captureOutputOrientation;
     BOOL _captureOutputOrientationSupported;
     BOOL _captureOutputMirrored;
+    NSString *_captureOutputApplication;
 }
 
 - (NSString *)privateDirectory;
@@ -151,6 +152,7 @@ static void VCamSendOrientationDiagnosticToSpringBoard(NSString *message) {
         _captureOutputOrientation = -1;
         _captureOutputOrientationSupported = NO;
         _captureOutputMirrored = NO;
+        _captureOutputApplication = @"";
 
         NSDictionary *saved = [NSDictionary dictionaryWithContentsOfFile:[self stateFilePath]];
         if ([saved isKindOfClass:[NSDictionary class]]) {
@@ -315,6 +317,7 @@ static void VCamSendOrientationDiagnosticToSpringBoard(NSString *message) {
         @"captureOutputOrientation": @(_captureOutputOrientation),
         @"captureOutputOrientationSupported": @(_captureOutputOrientationSupported),
         @"captureOutputMirrored": @(_captureOutputMirrored),
+        @"captureOutputApplication": _captureOutputApplication ?: @"",
         @"engineStatus": _engineStatus ?: @"not_reported",
         @"engineDetail": _engineDetail ?: @"",
         @"engineHooks": @(_engineHooks),
@@ -333,6 +336,7 @@ static void VCamSendOrientationDiagnosticToSpringBoard(NSString *message) {
     [dictionary removeObjectForKey:@"captureOutputOrientation"];
     [dictionary removeObjectForKey:@"captureOutputOrientationSupported"];
     [dictionary removeObjectForKey:@"captureOutputMirrored"];
+    [dictionary removeObjectForKey:@"captureOutputApplication"];
     dictionary[@"mediaPath"] = _mediaPath ?: @"";
 
     NSError *error = nil;
@@ -816,6 +820,9 @@ static void VCamSendOrientationDiagnosticToSpringBoard(NSString *message) {
             ? [report[@"orientation"] integerValue] : -1;
         BOOL supported = [report[@"supported"] boolValue];
         BOOL mirrored = [report[@"mirrored"] boolValue];
+        NSString *application = [report[@"application"] isKindOfClass:[NSString class]]
+            ? [report[@"application"] substringToIndex:MIN([(NSString *)report[@"application"] length], (NSUInteger)128)]
+            : @"";
         if (orientation < -1 || orientation > 4) {
             NSData *responseBody = [@"Invalid video orientation" dataUsingEncoding:NSUTF8StringEncoding];
             NSString *responseHeader = [NSString stringWithFormat:
@@ -831,6 +838,7 @@ static void VCamSendOrientationDiagnosticToSpringBoard(NSString *message) {
         _captureOutputOrientation = orientation;
         _captureOutputOrientationSupported = (orientation >= 1);
         _captureOutputMirrored = mirrored;
+        _captureOutputApplication = [application copy];
         [_stateLock unlock];
 
         NSData *responseBody = [@"{\"ok\":true}" dataUsingEncoding:NSUTF8StringEncoding];
