@@ -68,7 +68,6 @@ static CFTimeInterval g_lastVideoOutputCallbackTime = 0.0;
 static const void *kVCamPreviewOverlayKey = &kVCamPreviewOverlayKey;
 
 static void VCamAttachPreviewOverlay(AVCaptureVideoPreviewLayer *previewLayer);
-static void VCamUpdatePreviewOverlaysWithSampleBuffer(CMSampleBufferRef sampleBuffer);
 static void VCamUpdatePreviewOverlaysWithJPEG(NSData *jpegData);
 static void VCamSetPreviewOverlaysVisible(BOOL visible);
 
@@ -734,26 +733,6 @@ static void VCamSetPreviewOverlaysVisible(BOOL visible) {
     });
 }
 
-static void VCamUpdatePreviewOverlaysWithSampleBuffer(CMSampleBufferRef sampleBuffer) {
-    if (!sampleBuffer || !VCamIsEnabled()) return;
-    CVImageBufferRef imageBuffer = CMSampleBufferGetImageBuffer(sampleBuffer);
-    if (!imageBuffer) return;
-
-    static dispatch_once_t onceToken;
-    dispatch_once(&onceToken, ^{
-        g_previewCIContext = [CIContext contextWithOptions:@{kCIContextUseSoftwareRenderer: @NO}];
-    });
-
-    CIImage *image = [CIImage imageWithCVPixelBuffer:imageBuffer];
-    CGRect extent = image.extent;
-    if (CGRectIsEmpty(extent) || extent.size.width < 2.0 || extent.size.height < 2.0) return;
-
-    CGImageRef cgImage = [g_previewCIContext createCGImage:image fromRect:extent];
-    if (!cgImage) return;
-    VCamSetPreviewOverlayContents(cgImage);
-    CGImageRelease(cgImage);
-}
-
 static void VCamUpdatePreviewOverlaysWithJPEG(NSData *jpegData) {
     if (!jpegData.length || !VCamIsEnabled()) return;
     UIImage *image = [UIImage imageWithData:jpegData];
@@ -980,7 +959,11 @@ static void VCamAttachPreviewOverlay(AVCaptureVideoPreviewLayer *previewLayer) {
     VCamLogAppFrameRoute(@"delegate-replacement",
                          sampleBuffer, virtualFrame, connection,
                          NO, NO);
-    VCamUpdatePreviewOverlaysWithSampleBuffer(virtualFrame);
+    // AVCaptureVideoDataOutput already receives this virtual sample directly.
+    // Do not paint a second, un-oriented CALayer over the app preview: apps
+    // with an active data-output delegate must render the sample through their
+    // own AVFoundation pipeline. The preview pump remains the fallback for
+    // apps that have no active data-output callback.
     @synchronized ([AVCaptureVideoDataOutput class]) {
         g_vcamVideoReplacementCount += 1;
     }
