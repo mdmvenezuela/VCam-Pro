@@ -408,8 +408,7 @@
         ? 1.018 + sin(motionTime * 0.35) * 0.002
         : 1.0;
 
-    // CORRECCIÓN: Usar MIN en lugar de MAX asegura que el rostro u objeto 
-    // quepa de manera uniforme dentro del área de captura sin estirarse ni alejarse de más.
+    // Usar MIN garantiza que la escala se ajuste de manera uniforme sin desproporcionar la distancia.
     CGFloat fitScale = MIN(targetWidth / extent.size.width, targetHeight / extent.size.height);
     CGFloat scale = fitScale * _zoom * motionScale;
     
@@ -417,15 +416,14 @@
 
     CGRect scaledExtent = image.extent;
     
-    // CORRECCIÓN: Centrado simétrico alineado con los offsets del usuario
     CGFloat translateX = ((targetWidth - scaledExtent.size.width) * 0.5) + (_offsetX * targetWidth);
     CGFloat translateY = ((targetHeight - scaledExtent.size.height) * 0.5) + (_offsetY * targetHeight);
     
     image = [image imageByApplyingTransform:CGAffineTransformMakeTranslation(translateX - scaledExtent.origin.x, translateY - scaledExtent.origin.y)];
 
     CGRect targetRect = CGRectMake(0, 0, targetWidth, targetHeight);
-    
-    // Fondo negro sólido para evitar bordes transparentes que confunden a los analizadores biométricos
+    image = [image imageByCroppingToRect:targetRect];
+
     CIImage *background = [[CIImage imageWithColor:[CIColor colorWithRed:0 green:0 blue:0 alpha:1]]
                            imageByCroppingToRect:targetRect];
     return [image imageByCompositingOverImage:background];
