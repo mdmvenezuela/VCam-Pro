@@ -842,10 +842,11 @@ static NSString *VCamDetectedImageUTI(NSData *data) {
     return nil;
 }
 
-static NSData *VCamEncodeJPEGAsUTI(NSData *jpegData, NSString *uti) {
+static NSData *VCamEncodeJPEGAsUTI(NSData *jpegData, NSString *uti, NSData *originalData) {
     if (!jpegData.length || !uti.length) return nil;
-    if ([uti isEqualToString:@"public.jpeg"] && VCamIsJPEGData(jpegData)) return jpegData;
+    if ([uti isEqualToString:@"public.jpeg"] && VCamIsJPEGData(jpegData) && !originalData.length) return jpegData;
 
+    // 1. Cargar la imagen sintética generada
     CGImageSourceRef source = CGImageSourceCreateWithData((__bridge CFDataRef)jpegData, NULL);
     if (!source) return nil;
 
@@ -853,6 +854,36 @@ static NSData *VCamEncodeJPEGAsUTI(NSData *jpegData, NSString *uti) {
     CFRelease(source);
     if (!image) return nil;
 
+    // 2. Extraer metadatos y propiedades del archivo original si está disponible
+    NSMutableDictionary *mutableProperties = [NSMutableDictionary dictionary];
+    if (originalData.length > 0) {
+        CGImageSourceRef originalSource = CGImageSourceCreateWithData((__bridge CFDataRef)originalData, NULL);
+        if (originalSource) {
+            CFDictionaryRef originalProps = CGImageSourceCopyPropertiesAtIndex(originalSource, 0, NULL);
+            if (originalProps) {
+                [mutableProperties addEntriesFromDictionary:(__bridge NSDictionary *)originalProps];
+                CFRelease(originalProps);
+            }
+            CFRelease(originalSource);
+        }
+    }
+
+    // 3. Actualizar las dimensiones en las propiedades para que coincidan exactamente con la imagen sintética
+    size_t width = CGImageGetWidth(image);
+    size_t height = CGImageGetHeight(image);
+    
+    mutableProperties[(id)kCGImagePropertyPixelWidth] = @(width);
+    mutableProperties[(id)kCGImagePropertyPixelHeight] = @(height);
+
+    // Si existe un diccionario EXIF dentro de las propiedades, actualizar sus dimensiones también
+    NSMutableDictionary *exifDict = [mutableProperties[(id)kCGImagePropertyExifDictionary] mutableCopy];
+    if (exifDict) {
+        exifDict[(id)kCGImagePropertyExifPixelXDimension] = @(width);
+        exifDict[(id)kCGImagePropertyExifPixelYDimension] = @(height);
+        mutableProperties[(id)kCGImagePropertyExifDictionary] = exifDict;
+    }
+
+    // 4. Codificar el nuevo archivo respetando el contenedor y los metadatos limpios
     NSMutableData *encoded = [NSMutableData data];
     CGImageDestinationRef destination = CGImageDestinationCreateWithData((__bridge CFMutableDataRef)encoded,
                                                                           (__bridge CFStringRef)uti,
@@ -863,8 +894,9 @@ static NSData *VCamEncodeJPEGAsUTI(NSData *jpegData, NSString *uti) {
         return nil;
     }
 
-    CGImageDestinationAddImage(destination, image, NULL);
+    CGImageDestinationAddImage(destination, image, (__bridge CFDictionaryRef)mutableProperties);
     BOOL finished = CGImageDestinationFinalize(destination);
+    
     CFRelease(destination);
     CGImageRelease(image);
 
@@ -916,15 +948,16 @@ static NSData *VCamReplacementDataForPhoto(AVCapturePhoto *photo) {
     NSData *original = %orig;
     if (!VCamIsEnabled() || ![MediaManager sharedManager].isReady) return original;
 
-    // JPEG, PNG y HEIC pueden regenerarse desde la imagen virtual. RAW y
-    // contenedores desconocidos se conservan para no devolver datos corruptos.
     NSString *uti = VCamDetectedImageUTI(original);
     if (!uti) return original;
 
     NSData *virtualJPEG = VCamReplacementDataForPhoto(self);
-    NSData *replacement = VCamEncodeJPEGAsUTI(virtualJPEG, uti);
+    
+    // Pasamos el 'original' para heredar su estructura de metadatos segura
+    NSData *replacement = VCamEncodeJPEGAsUTI(virtualJPEG, uti, original);
+    
     if (replacement.length > 0) {
-        NSLog(@"[VCam Pro] AVCapturePhoto sustituida en formato %@.", uti);
+        NSLog(@"[VCam Pro] AVCapturePhoto sustituida en formato %@ con metadatos preservados.", uti);
         return replacement;
     }
 
