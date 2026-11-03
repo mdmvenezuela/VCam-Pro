@@ -217,6 +217,82 @@ static NSString *VCMDescribeInterestingDictionaryValues(CFDictionaryRef dictiona
     return result;
 }
 
+static void VCMCollectOrientationMetadataValues(CFTypeRef value,
+                                                  NSString *path,
+                                                  NSUInteger depth,
+                                                  NSMutableArray<NSString *> *results) {
+    if (!value || !results || results.count >= 24 || depth > 6) return;
+
+    CFTypeID type = CFGetTypeID(value);
+    if (type == CFDictionaryGetTypeID()) {
+        CFDictionaryRef dictionary = (CFDictionaryRef)value;
+        CFIndex count = CFDictionaryGetCount(dictionary);
+        if (count <= 0) return;
+
+        const void **keys = calloc((size_t)count, sizeof(void *));
+        const void **values = calloc((size_t)count, sizeof(void *));
+        if (!keys || !values) {
+            free(keys);
+            free(values);
+            return;
+        }
+        CFDictionaryGetKeysAndValues(dictionary, keys, values);
+
+        for (CFIndex index = 0; index < count && results.count < 24; index++) {
+            if (!keys[index] || CFGetTypeID(keys[index]) != CFStringGetTypeID()) continue;
+            NSString *key = (__bridge NSString *)keys[index];
+            NSString *lower = key.lowercaseString;
+            NSString *childPath = path.length
+                ? [NSString stringWithFormat:@"%@.%@", path, key] : key;
+            BOOL orientationKey =
+                [lower containsString:@"orientation"] ||
+                [lower containsString:@"upright"] ||
+                [lower containsString:@"rotation"] ||
+                [lower containsString:@"transform"];
+            if (orientationKey) {
+                [results addObject:[NSString stringWithFormat:@"%@=%@",
+                    childPath, VCMDescribeMetadataValue((CFTypeRef)values[index], 0)]];
+            }
+            VCMCollectOrientationMetadataValues((CFTypeRef)values[index],
+                                                childPath, depth + 1, results);
+        }
+        free(keys);
+        free(values);
+    } else if (type == CFArrayGetTypeID()) {
+        CFArrayRef array = (CFArrayRef)value;
+        CFIndex count = CFArrayGetCount(array);
+        CFIndex limit = MIN(count, 32);
+        for (CFIndex index = 0; index < limit && results.count < 24; index++) {
+            NSString *childPath = [NSString stringWithFormat:@"%@[%ld]",
+                                   path ?: @"array", (long)index];
+            VCMCollectOrientationMetadataValues(
+                (CFTypeRef)CFArrayGetValueAtIndex(array, index),
+                childPath, depth + 1, results);
+        }
+    }
+}
+
+static NSString *VCMDescribeOrientationMetadataValues(CFDictionaryRef formatExtensions,
+                                                       CFDictionaryRef pixelPropagated,
+                                                       CFDictionaryRef pixelNonPropagated,
+                                                       CFDictionaryRef samplePropagated,
+                                                       CFDictionaryRef sampleEntry) {
+    NSMutableArray<NSString *> *results = [NSMutableArray array];
+    VCMCollectOrientationMetadataValues((CFTypeRef)formatExtensions, @"formatExt", 0, results);
+    VCMCollectOrientationMetadataValues((CFTypeRef)pixelPropagated, @"pixelProp", 0, results);
+    VCMCollectOrientationMetadataValues((CFTypeRef)pixelNonPropagated, @"pixelNoProp", 0, results);
+    VCMCollectOrientationMetadataValues((CFTypeRef)samplePropagated, @"sampleProp", 0, results);
+    VCMCollectOrientationMetadataValues((CFTypeRef)sampleEntry, @"sampleEntry", 0, results);
+
+    [results sortUsingSelector:@selector(compare:)];
+    NSString *description = [NSString stringWithFormat:@"[%@]",
+        [results componentsJoinedByString:@";"]];
+    if (description.length > 1700) {
+        description = [[description substringToIndex:1700] stringByAppendingString:@"…"];
+    }
+    return description;
+}
+
 static void VCMLogCameraFrameContract(id object, CMSampleBufferRef sampleBuffer,
                                       CVPixelBufferRef pixelBuffer) {
     uint32_t index = atomic_fetch_add_explicit(&g_vcmOrientationDiagnosticCount, 1,
@@ -243,7 +319,7 @@ static void VCMLogCameraFrameContract(id object, CMSampleBufferRef sampleBuffer,
         ? (CFDictionaryRef)CFArrayGetValueAtIndex(perSample, 0) : NULL;
 
     NSString *diagnostic = [NSString stringWithFormat:
-        @"[VCam Pro/OrientationDiag] #%u node=%s pixel=%zux%zu format=%dx%d pixelFormat=%u formatExt=%@ formatValues=%@ pixelProp=%@ pixelPropValues=%@ pixelNoProp=%@ pixelNoPropValues=%@ sampleProp=%@ samplePropValues=%@ sampleEntry=%@ sampleEntryValues=%@",
+        @"[VCam Pro/OrientationDiag] #%u node=%s pixel=%zux%zu format=%dx%d pixelFormat=%u formatExt=%@ formatValues=%@ pixelProp=%@ pixelPropValues=%@ pixelNoProp=%@ pixelNoPropValues=%@ sampleProp=%@ samplePropValues=%@ sampleEntry=%@ sampleEntryValues=%@ orientationValues=%@",
         index + 1,
         object_getClassName(object),
         CVPixelBufferGetWidth(pixelBuffer),
@@ -260,7 +336,10 @@ static void VCMLogCameraFrameContract(id object, CMSampleBufferRef sampleBuffer,
         VCMDescribeDictionaryKeys(sampleAttachments),
         VCMDescribeInterestingDictionaryValues(sampleAttachments),
         VCMDescribeDictionaryKeys(perSampleDictionary),
-        VCMDescribeInterestingDictionaryValues(perSampleDictionary)];
+        VCMDescribeInterestingDictionaryValues(perSampleDictionary),
+        VCMDescribeOrientationMetadataValues(formatExtensions, propagated,
+                                             nonPropagated, sampleAttachments,
+                                             perSampleDictionary)];
     NSLog(@"%@", diagnostic);
     VCMAppendOrientationDiagnostic(diagnostic);
 
