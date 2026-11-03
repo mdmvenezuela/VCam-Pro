@@ -1644,9 +1644,372 @@ static NSInteger VCamReadImageExifOrientation(NSData *imageData) {
     return orientation;
 }
 
+
+#pragma mark - Still Photo Diagnostics (Read Only)
+
+// Diagnostics deliberately record metadata schema and attachment availability,
+// not GPS values, MakerNotes payloads, serial numbers, or camera calibration
+// matrices. This lets us identify the capture contract without exporting
+// private hardware identifiers or fabricating sensor provenance.
+static NSString * const kVCamPhotoDiagSuppressionKey =
+    @"com.vcam.pro.photo-diagnostics.internal-read";
+
+static BOOL VCamPhotoDiagnosticsAreSuppressed(void) {
+    return [NSThread.currentThread.threadDictionary[
+        kVCamPhotoDiagSuppressionKey
+    ] boolValue];
+}
+
+static BOOL VCamMetadataKeyIsSensitive(NSString *key) {
+    NSString *lower = key.lowercaseString;
+    return [lower containsString:@"gps"] ||
+           [lower containsString:@"location"] ||
+           [lower containsString:@"serial"] ||
+           [lower containsString:@"makernote"] ||
+           [lower containsString:@"makerapple"] ||
+           [lower containsString:@"unique"] ||
+           [lower containsString:@"assetidentifier"] ||
+           [lower containsString:@"datetime"] ||
+           [lower containsString:@"ownername"];
+}
+
+static NSString *VCamDictionarySchema(NSDictionary *dictionary,
+                                      BOOL includeSafeFormatValues) {
+    if (![dictionary isKindOfClass:[NSDictionary class]]) return @"(none)";
+
+    NSArray *keys = [[dictionary allKeys] sortedArrayUsingComparator:
+        ^NSComparisonResult(id a, id b) {
+            return [[a description] compare:[b description]];
+        }];
+
+    NSMutableArray<NSString *> *parts = [NSMutableArray array];
+    NSUInteger limit = MIN(keys.count, (NSUInteger)64);
+
+    for (NSUInteger index = 0; index < limit; index++) {
+        id rawKey = keys[index];
+        NSString *key = [rawKey description] ?: @"(unknown-key)";
+        id value = dictionary[rawKey];
+        NSString *valueClass = value ? NSStringFromClass([value class]) : @"nil";
+
+        if (VCamMetadataKeyIsSensitive(key)) {
+            [parts addObject:[NSString stringWithFormat:@"%@=<present; value redacted>", key]];
+            continue;
+        }
+
+        if ([value isKindOfClass:[NSDictionary class]]) {
+            NSDictionary *nested = (NSDictionary *)value;
+            NSArray *nestedKeys = [[nested allKeys] sortedArrayUsingComparator:
+                ^NSComparisonResult(id a, id b) {
+                    return [[a description] compare:[b description]];
+                }];
+            NSMutableArray<NSString *> *safeNestedKeys = [NSMutableArray array];
+            NSUInteger nestedLimit = MIN(nestedKeys.count, (NSUInteger)32);
+            for (NSUInteger nestedIndex = 0; nestedIndex < nestedLimit; nestedIndex++) {
+                NSString *nestedKey = [nestedKeys[nestedIndex] description] ?: @"(unknown)";
+                if (VCamMetadataKeyIsSensitive(nestedKey)) {
+                    [safeNestedKeys addObject:[NSString stringWithFormat:@"%@=<redacted>", nestedKey]];
+                } else {
+                    [safeNestedKeys addObject:nestedKey];
+                }
+            }
+            [parts addObject:[NSString stringWithFormat:@"%@=%@{keys=[%@]%@}",
+                key, valueClass,
+                [safeNestedKeys componentsJoinedByString:@","],
+                nestedKeys.count > nestedLimit ? @",truncated" : @""]];
+            continue;
+        }
+
+        if (includeSafeFormatValues &&
+            ([key localizedCaseInsensitiveContainsString:@"PixelFormat"] ||
+             [key localizedCaseInsensitiveContainsString:@"Width"] ||
+             [key localizedCaseInsensitiveContainsString:@"Height"] ||
+             [key localizedCaseInsensitiveContainsString:@"Codec"]) &&
+            ([value isKindOfClass:[NSNumber class]] ||
+             [value isKindOfClass:[NSString class]])) {
+            [parts addObject:[NSString stringWithFormat:@"%@=%@", key, value]];
+        } else if ([value isKindOfClass:[NSData class]]) {
+            [parts addObject:[NSString stringWithFormat:@"%@=NSData(%lu bytes)",
+                key, (unsigned long)[(NSData *)value length]]];
+        } else if ([value isKindOfClass:[NSArray class]]) {
+            [parts addObject:[NSString stringWithFormat:@"%@=NSArray(%lu)",
+                key, (unsigned long)[(NSArray *)value count]]];
+        } else {
+            [parts addObject:[NSString stringWithFormat:@"%@=%@", key, valueClass]];
+        }
+    }
+
+    return [NSString stringWithFormat:@"count=%lu keys=[%@]%@",
+        (unsigned long)keys.count,
+        [parts componentsJoinedByString:@"; "],
+        keys.count > limit ? @"; truncated" : @""];
+}
+
+static NSString *VCamPixelBufferSummary(CVPixelBufferRef pixelBuffer) {
+    if (!pixelBuffer) return @"absent";
+    return [NSString stringWithFormat:@"%zux%zu pixelFormat=%u planes=%zu",
+        CVPixelBufferGetWidth(pixelBuffer),
+        CVPixelBufferGetHeight(pixelBuffer),
+        (unsigned int)CVPixelBufferGetPixelFormatType(pixelBuffer),
+        CVPixelBufferGetPlaneCount(pixelBuffer)];
+}
+
+static NSString *VCamCalibrationSummary(AVCameraCalibrationData *calibration) {
+    if (!calibration) return @"absent";
+
+    CGSize referenceSize = calibration.intrinsicMatrixReferenceDimensions;
+    NSData *forwardLUT = calibration.lensDistortionLookupTable;
+    NSData *inverseLUT = calibration.inverseLensDistortionLookupTable;
+
+    return [NSString stringWithFormat:
+        @"present referenceDimensions=%.0fx%.0f pixelSize=%.6f forwardLUT=%luB inverseLUT=%luB",
+        referenceSize.width, referenceSize.height,
+        calibration.pixelSize,
+        (unsigned long)forwardLUT.length,
+        (unsigned long)inverseLUT.length];
+}
+
+static NSString *VCamDepthSummary(AVDepthData *depthData) {
+    if (!depthData) return @"absent";
+    return [NSString stringWithFormat:
+        @"present depthMap={%@} dataType=%u filtered=%d calibration={%@}",
+        VCamPixelBufferSummary(depthData.depthDataMap),
+        (unsigned int)depthData.depthDataType,
+        depthData.isDepthDataFiltered,
+        VCamCalibrationSummary(depthData.cameraCalibrationData)];
+}
+
+static NSString *VCamPortraitMatteSummary(AVPortraitEffectsMatte *matte) {
+    if (!matte) return @"absent";
+    return [NSString stringWithFormat:@"present matteBuffer={%@} pixelFormat=%u",
+        VCamPixelBufferSummary(matte.mattingImage),
+        (unsigned int)matte.pixelFormatType];
+}
+
+static NSString *VCamBooleanPropertyDescription(id object,
+                                                NSString *selectorName) {
+    SEL selector = NSSelectorFromString(selectorName);
+    if (!object || ![object respondsToSelector:selector]) return @"n/a";
+    BOOL (*sendBoolean)(id, SEL) = (BOOL (*)(id, SEL))objc_msgSend;
+    return sendBoolean(object, selector) ? @"yes" : @"no";
+}
+
+static void VCamLogPhotoOutputCapabilities(AVCapturePhotoOutput *output) {
+    if (!output) return;
+
+    NSMutableArray<NSString *> *mediaTypes = [NSMutableArray array];
+    for (AVCaptureConnection *connection in output.connections ?: @[]) {
+        for (AVCaptureInputPort *port in connection.inputPorts ?: @[]) {
+            [mediaTypes addObject:port.mediaType ?: @"(unknown)"];
+        }
+    }
+
+    NSLog(@"[VCam PhotoDiag] OUTPUT output=%p class=%@ connections=%lu inputMediaTypes=%@ depthSupported=%@ depthEnabled=%@ portraitMatteSupported=%@ portraitMatteEnabled=%@ calibrationSupported=%@ calibrationEnabled=%@ highResolutionEnabled=%@",
+        (__bridge void *)output,
+        NSStringFromClass([output class]),
+        (unsigned long)output.connections.count,
+        mediaTypes,
+        VCamBooleanPropertyDescription(output, @"isDepthDataDeliverySupported"),
+        VCamBooleanPropertyDescription(output, @"isDepthDataDeliveryEnabled"),
+        VCamBooleanPropertyDescription(output, @"isPortraitEffectsMatteDeliverySupported"),
+        VCamBooleanPropertyDescription(output, @"isPortraitEffectsMatteDeliveryEnabled"),
+        VCamBooleanPropertyDescription(output, @"isCameraCalibrationDataDeliverySupported"),
+        VCamBooleanPropertyDescription(output, @"isCameraCalibrationDataDeliveryEnabled"),
+        VCamBooleanPropertyDescription(output, @"isHighResolutionCaptureEnabled"));
+}
+
+static void VCamLogPhotoCaptureSettings(AVCapturePhotoOutput *output,
+                                        AVCapturePhotoSettings *settings,
+                                        NSString *stage) {
+    if (!settings) {
+        NSLog(@"[VCam PhotoDiag] SETTINGS stage=%@ settings=nil output=%p",
+              stage ?: @"unknown", (__bridge void *)output);
+        return;
+    }
+
+    CMVideoDimensions dimensions = settings.maxPhotoDimensions;
+    NSArray *matteTypes = settings.enabledSemanticSegmentationMatteTypes ?: @[];
+
+    NSLog(@"[VCam PhotoDiag] SETTINGS stage=%@ output=%p settings=%p uniqueID=%lld flashMode=%ld qualityPrioritization=%ld rawPixelFormat=%u maxPhotoDimensions=%dx%d depthEnabled=%@ embedsDepth=%@ depthFiltered=%@ portraitMatteEnabled=%@ embedsPortraitMatte=%@ embedsSemanticMattes=%@ semanticMatteTypes=%@ calibrationDataEnabled=%@ autoRedEye=%@ autoDistortionCorrection=%@ livePhotoRequested=%d",
+        stage ?: @"unknown",
+        (__bridge void *)output,
+        (__bridge void *)settings,
+        (long long)settings.uniqueID,
+        (long)settings.flashMode,
+        (long)settings.photoQualityPrioritization,
+        (unsigned int)settings.rawPhotoPixelFormatType,
+        dimensions.width, dimensions.height,
+        VCamBooleanPropertyDescription(settings, @"isDepthDataDeliveryEnabled"),
+        VCamBooleanPropertyDescription(settings, @"embedsDepthDataInPhoto"),
+        VCamBooleanPropertyDescription(settings, @"isDepthDataFiltered"),
+        VCamBooleanPropertyDescription(settings, @"isPortraitEffectsMatteDeliveryEnabled"),
+        VCamBooleanPropertyDescription(settings, @"embedsPortraitEffectsMatteInPhoto"),
+        VCamBooleanPropertyDescription(settings, @"embedsSemanticSegmentationMattesInPhoto"),
+        matteTypes,
+        VCamBooleanPropertyDescription(settings, @"isCameraCalibrationDataDeliveryEnabled"),
+        VCamBooleanPropertyDescription(settings, @"isAutoRedEyeReductionEnabled"),
+        VCamBooleanPropertyDescription(settings, @"isAutoContentAwareDistortionCorrectionEnabled"),
+        settings.livePhotoMovieFileURL != nil);
+
+    NSLog(@"[VCam PhotoDiag] SETTINGS_FORMAT format={%@} rawFileFormat={%@} previewFormat={%@} embeddedThumbnailFormat={%@} metadata={%@} livePhotoMetadata={%@}",
+        VCamDictionarySchema(settings.format, YES),
+        VCamDictionarySchema(settings.rawFileFormat, YES),
+        VCamDictionarySchema(settings.previewPhotoFormat, YES),
+        VCamDictionarySchema(settings.embeddedThumbnailPhotoFormat, YES),
+        VCamDictionarySchema(settings.metadata, NO),
+        VCamDictionarySchema(settings.livePhotoMovieMetadata.count
+            ? @{@"livePhotoMovieMetadata": settings.livePhotoMovieMetadata}
+            : nil, NO));
+
+    VCamLogPhotoOutputCapabilities(output);
+}
+
+static void VCamLogPhotoSnapshot(AVCapturePhoto *photo,
+                                 AVCapturePhotoSettings *requestedSettings) {
+    if (!photo) {
+        NSLog(@"[VCam PhotoDiag] PHOTO callback received nil photo");
+        return;
+    }
+
+    NSMutableDictionary *threadDictionary =
+        NSThread.currentThread.threadDictionary;
+    id previousSuppression =
+        threadDictionary[kVCamPhotoDiagSuppressionKey];
+    threadDictionary[kVCamPhotoDiagSuppressionKey] = @YES;
+
+    NSDictionary *metadata = nil;
+    AVCaptureResolvedPhotoSettings *resolvedSettings = nil;
+    AVDepthData *depthData = nil;
+    AVCameraCalibrationData *calibration = nil;
+    AVPortraitEffectsMatte *portraitMatte = nil;
+    CVPixelBufferRef pixelBuffer = NULL;
+    CVPixelBufferRef previewPixelBuffer = NULL;
+    BOOL rawPhoto = NO;
+    NSInteger photoCount = 0;
+    NSInteger sequenceCount = 0;
+    CMTime timestamp = kCMTimeInvalid;
+    NSString *sourceDeviceType = nil;
+
+    @try {
+        metadata = photo.metadata;
+        resolvedSettings = photo.resolvedSettings;
+        depthData = photo.depthData;
+        calibration = photo.cameraCalibrationData;
+        portraitMatte = photo.portraitEffectsMatte;
+        pixelBuffer = photo.pixelBuffer;
+        previewPixelBuffer = photo.previewPixelBuffer;
+        rawPhoto = photo.isRawPhoto;
+        photoCount = photo.photoCount;
+        sequenceCount = photo.sequenceCount;
+        timestamp = photo.timestamp;
+        sourceDeviceType = photo.sourceDeviceType;
+    } @finally {
+        if (previousSuppression) {
+            threadDictionary[kVCamPhotoDiagSuppressionKey] = previousSuppression;
+        } else {
+            [threadDictionary removeObjectForKey:kVCamPhotoDiagSuppressionKey];
+        }
+    }
+
+    double seconds = CMTimeGetSeconds(timestamp);
+    NSLog(@"[VCam PhotoDiag] PHOTO outputCaptureID=%lld resolvedID=%lld class=%@ photoCount=%ld sequenceCount=%ld raw=%d sourceDeviceType=%@ timestamp=%.6f requestedFormat={%@}",
+        (long long)requestedSettings.uniqueID,
+        (long long)resolvedSettings.uniqueID,
+        NSStringFromClass([photo class]),
+        (long)photoCount,
+        (long)sequenceCount,
+        rawPhoto,
+        sourceDeviceType ?: @"(not supplied)",
+        isfinite(seconds) ? seconds : -1.0,
+        VCamDictionarySchema(requestedSettings.format, YES));
+
+    NSLog(@"[VCam PhotoDiag] PHOTO_ATTACHMENTS metadata={%@} pixelBuffer={%@} previewPixelBuffer={%@} depthData={%@} cameraCalibration={%@} portraitEffectsMatte={%@}",
+        VCamDictionarySchema(metadata, NO),
+        VCamPixelBufferSummary(pixelBuffer),
+        VCamPixelBufferSummary(previewPixelBuffer),
+        VCamDepthSummary(depthData),
+        VCamCalibrationSummary(calibration),
+        VCamPortraitMatteSummary(portraitMatte));
+}
+
+static void VCamLogPhotoPropertyAccess(NSString *property,
+                                       NSString *summary) {
+    if (VCamPhotoDiagnosticsAreSuppressed()) return;
+    NSLog(@"[VCam PhotoDiag] APP_ACCESS property=%@ result={%@}",
+        property ?: @"(unknown)", summary ?: @"(no summary)");
+}
+
+static NSString *VCamImageDataSummary(NSData *data) {
+    if (!data.length) return @"absent";
+    return [NSString stringWithFormat:@"%@ %lu bytes",
+        VCamDetectedImageUTI(data) ?: @"unknown-container",
+        (unsigned long)data.length];
+}
+
 %hook AVCapturePhoto
 
+- (NSDictionary *)metadata {
+    NSDictionary *value = %orig;
+    VCamLogPhotoPropertyAccess(@"metadata", VCamDictionarySchema(value, NO));
+    return value;
+}
+
+- (AVDepthData *)depthData {
+    AVDepthData *value = %orig;
+    VCamLogPhotoPropertyAccess(@"depthData", VCamDepthSummary(value));
+    return value;
+}
+
+- (AVCameraCalibrationData *)cameraCalibrationData {
+    AVCameraCalibrationData *value = %orig;
+    VCamLogPhotoPropertyAccess(@"cameraCalibrationData", VCamCalibrationSummary(value));
+    return value;
+}
+
+- (AVPortraitEffectsMatte *)portraitEffectsMatte {
+    AVPortraitEffectsMatte *value = %orig;
+    VCamLogPhotoPropertyAccess(@"portraitEffectsMatte", VCamPortraitMatteSummary(value));
+    return value;
+}
+
+- (CVPixelBufferRef)pixelBuffer {
+    CVPixelBufferRef value = %orig;
+    VCamLogPhotoPropertyAccess(@"pixelBuffer", VCamPixelBufferSummary(value));
+    return value;
+}
+
+- (CVPixelBufferRef)previewPixelBuffer {
+    CVPixelBufferRef value = %orig;
+    VCamLogPhotoPropertyAccess(@"previewPixelBuffer", VCamPixelBufferSummary(value));
+    return value;
+}
+
+- (AVCaptureResolvedPhotoSettings *)resolvedSettings {
+    AVCaptureResolvedPhotoSettings *value = %orig;
+    VCamLogPhotoPropertyAccess(@"resolvedSettings",
+        value ? [NSString stringWithFormat:@"uniqueID=%lld class=%@",
+            (long long)value.uniqueID, NSStringFromClass([value class])] : @"absent");
+    return value;
+}
+
+- (BOOL)isRawPhoto {
+    BOOL value = %orig;
+    VCamLogPhotoPropertyAccess(@"isRawPhoto", value ? @"YES" : @"NO");
+    return value;
+}
+
+- (CGImageRef)cgImageRepresentation {
+    CGImageRef value = %orig;
+    NSString *summary = value
+        ? [NSString stringWithFormat:@"%zux%zu",
+            CGImageGetWidth(value), CGImageGetHeight(value)]
+        : @"absent";
+    VCamLogPhotoPropertyAccess(@"cgImageRepresentation", summary);
+    return value;
+}
+
+
 - (CGImageRef)previewCGImageRepresentation {
+    VCamLogPhotoPropertyAccess(@"previewCGImageRepresentation", @"requested");
     CGImageRef original = %orig;
     if (!original || !VCamIsEnabled() || ![MediaManager sharedManager].isReady) return original;
 
@@ -1665,11 +2028,18 @@ static NSInteger VCamReadImageExifOrientation(NSData *imageData) {
 
 
 - (NSData *)fileDataRepresentation {
+    VCamLogPhotoPropertyAccess(@"fileDataRepresentation", @"requested");
     NSData *cachedSerializedData =
         objc_getAssociatedObject(self, &kVCamPhotoSerializedDataKey);
-    if (cachedSerializedData.length > 0) return cachedSerializedData;
+    if (cachedSerializedData.length > 0) {
+        NSLog(@"[VCam PhotoDiag] FILE_DATA source=cache output={%@}",
+              VCamImageDataSummary(cachedSerializedData));
+        return cachedSerializedData;
+    }
 
     NSData *original = %orig;
+    NSLog(@"[VCam PhotoDiag] FILE_DATA source=AVCapturePhoto.fileDataRepresentation original={%@}",
+          VCamImageDataSummary(original));
     if (!original.length ||
         !VCamIsEnabled() ||
         ![MediaManager sharedManager].isReady) {
@@ -1723,6 +2093,9 @@ static NSInteger VCamReadImageExifOrientation(NSData *imageData) {
                              &kVCamPhotoSerializedDataKey,
                              serializedData,
                              OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+    NSLog(@"[VCam PhotoDiag] FILE_DATA serialized originalContainer=%@ output={%@}",
+          containerUTI ?: @"unknown",
+          VCamImageDataSummary(serializedData));
     return serializedData;
 }
 
@@ -1735,10 +2108,12 @@ static char kVCamPhotoOutputDelegateMapKey;
 @interface VCamPhotoCaptureDelegateProxy : NSObject <AVCapturePhotoCaptureDelegate>
 @property (nonatomic, strong) id<AVCapturePhotoCaptureDelegate> originalDelegate;
 @property (nonatomic, weak) AVCapturePhotoOutput *photoOutput;
+@property (nonatomic, strong) AVCapturePhotoSettings *requestedSettings;
 @property (nonatomic, assign) int64_t captureUniqueID;
 
 - (instancetype)initWithDelegate:(id<AVCapturePhotoCaptureDelegate>)delegate
                           output:(AVCapturePhotoOutput *)output
+                        settings:(AVCapturePhotoSettings *)settings
                         uniqueID:(int64_t)uniqueID;
 - (void)releaseCaptureRetention;
 @end
@@ -1747,11 +2122,13 @@ static char kVCamPhotoOutputDelegateMapKey;
 
 - (instancetype)initWithDelegate:(id<AVCapturePhotoCaptureDelegate>)delegate
                           output:(AVCapturePhotoOutput *)output
+                        settings:(AVCapturePhotoSettings *)settings
                         uniqueID:(int64_t)uniqueID {
     self = [super init];
     if (self) {
         _originalDelegate = delegate;
         _photoOutput = output;
+        _requestedSettings = settings;
         _captureUniqueID = uniqueID;
     }
     return self;
@@ -1769,8 +2146,13 @@ static char kVCamPhotoOutputDelegateMapKey;
         return [self.originalDelegate respondsToSelector:selector];
     }
 
-    return [super respondsToSelector:selector] ||
-           [self.originalDelegate respondsToSelector:selector];
+    BOOL originalSupports = [self.originalDelegate respondsToSelector:selector];
+    BOOL proxyImplements = [super respondsToSelector:selector];
+    if ([NSStringFromSelector(selector) hasPrefix:@"captureOutput:"]) {
+        NSLog(@"[VCam PhotoDiag] DELEGATE_CAPABILITY selector=%@ appImplements=%d proxyImplements=%d",
+              NSStringFromSelector(selector), originalSupports, proxyImplements);
+    }
+    return proxyImplements || originalSupports;
 }
 
 - (id)forwardingTargetForSelector:(SEL)selector {
@@ -1782,17 +2164,16 @@ static char kVCamPhotoOutputDelegateMapKey;
 - (void)captureOutput:(AVCapturePhotoOutput *)output
 didFinishProcessingPhoto:(AVCapturePhoto *)photo
                 error:(NSError *)error {
-    if (photo && !error && VCamIsEnabled() &&
-        [MediaManager sharedManager].isReady) {
-        // fileDataRepresentation is hooked above. This eagerly runs the
-        // ImageIO serializer and caches its result on this AVCapturePhoto.
-        // The app still receives its original AVCapturePhoto instance.
-        NSData *normalizedData = [photo fileDataRepresentation];
-        if (!normalizedData.length) {
-            NSLog(@"[VCam Pro] ImageIO no pudo preparar la foto procesada; se conservará su representación original.");
-        }
-    }
+    NSLog(@"[VCam PhotoDiag] CALLBACK didFinishProcessingPhoto output=%p captureID=%lld error=%@",
+          (__bridge void *)output, (long long)self.captureUniqueID,
+          error ? [NSString stringWithFormat:@"%@/%ld",
+              error.domain, (long)error.code] : @"none");
+    VCamLogPhotoCaptureSettings(output, self.requestedSettings, @"RESOLVED_AT_PROCESSING");
+    VCamLogPhotoSnapshot(photo, self.requestedSettings);
 
+    // Do not eagerly call fileDataRepresentation here. The application may
+    // consume pixelBuffer, depthData, calibration, or another native attachment
+    // directly. Getter hooks below reveal which representation it actually reads.
     id<AVCapturePhotoCaptureDelegate> delegate = self.originalDelegate;
     SEL callback = @selector(captureOutput:didFinishProcessingPhoto:error:);
     if ([delegate respondsToSelector:callback]) {
@@ -1803,6 +2184,12 @@ didFinishProcessingPhoto:(AVCapturePhoto *)photo
 - (void)captureOutput:(AVCapturePhotoOutput *)output
 didFinishCaptureForResolvedSettings:(AVCaptureResolvedPhotoSettings *)resolvedSettings
                 error:(NSError *)error {
+    NSLog(@"[VCam PhotoDiag] CALLBACK didFinishCapture output=%p captureID=%lld resolvedID=%lld error=%@",
+          (__bridge void *)output,
+          (long long)self.captureUniqueID,
+          (long long)resolvedSettings.uniqueID,
+          error ? [NSString stringWithFormat:@"%@/%ld",
+              error.domain, (long)error.code] : @"none");
     id<AVCapturePhotoCaptureDelegate> delegate = self.originalDelegate;
     SEL callback = @selector(captureOutput:didFinishCaptureForResolvedSettings:error:);
 
@@ -1845,6 +2232,7 @@ didFinishCaptureForResolvedSettings:resolvedSettings
 
 - (void)capturePhotoWithSettings:(AVCapturePhotoSettings *)settings
                         delegate:(id<AVCapturePhotoCaptureDelegate>)delegate {
+    VCamLogPhotoCaptureSettings(self, settings, @"REQUEST");
     if (!settings || !delegate ||
         [delegate isKindOfClass:[VCamPhotoCaptureDelegateProxy class]] ||
         !VCamIsEnabled() ||
@@ -1857,6 +2245,7 @@ didFinishCaptureForResolvedSettings:resolvedSettings
     VCamPhotoCaptureDelegateProxy *proxy =
         [[VCamPhotoCaptureDelegateProxy alloc] initWithDelegate:delegate
                                                         output:self
+                                                      settings:settings
                                                       uniqueID:uniqueID];
 
     NSNumber *key = @(uniqueID);
