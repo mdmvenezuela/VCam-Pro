@@ -101,7 +101,7 @@ static void VCamAppendOrientationDiagnosticLine(NSString *message) {
 
     NSString *line = [message stringByAppendingString:@"\n"];
     NSData *data = [line dataUsingEncoding:NSUTF8StringEncoding];
-    const uint8_t *bytes = data.bytes;
+    const uint8_t *bytes = (const uint8_t *)(const uint8_t *)data.bytes;
     size_t remaining = data.length;
     while (remaining > 0) {
         ssize_t written = write(fd, bytes, remaining);
@@ -922,7 +922,7 @@ static void VCamAttachPreviewOverlay(AVCaptureVideoPreviewLayer *previewLayer) {
 
 static BOOL VCamIsJPEGData(NSData *data) {
     if (data.length < 3) return NO;
-    const uint8_t *bytes = (const uint8_t *)data.bytes;
+    const uint8_t *bytes = (const uint8_t *)(const uint8_t *)data.bytes;
     return bytes[0] == 0xFF && bytes[1] == 0xD8 && bytes[2] == 0xFF;
 }
 
