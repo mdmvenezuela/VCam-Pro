@@ -16,6 +16,7 @@
 #import <sys/stat.h>
 #import <fcntl.h>
 #import <limits.h>
+#import <stdint.h>
 #import <stdlib.h>
 #import <math.h>
 #import <string.h>
@@ -1541,9 +1542,9 @@ static NSData *VCAMSerializeImageData(
             (__bridge NSString *)kCGImagePropertyExifColorSpace: @1
         };
 
+        // TIFF carries the normalized orientation. Pixel dimensions are
+        // written in the standard ImageIO top-level keys and EXIF dimensions.
         NSDictionary *tiffProperties = @{
-            (__bridge NSString *)kCGImagePropertyTIFFImageWidth: @(finalWidth),
-            (__bridge NSString *)kCGImagePropertyTIFFImageLength: @(finalHeight),
             (__bridge NSString *)kCGImagePropertyTIFFOrientation: @1
         };
 
