@@ -387,6 +387,7 @@ static BOOL VCMDownloadMedia(NSString *destinationPath, NSInteger revision) {
     CGAffineTransform _preferredTransform;
     NSInteger _captureOutputOrientation;
     BOOL _captureOutputOrientationSupported;
+    NSString *_captureOutputApplication;
     NSInteger _loadedRevision;
     NSInteger _loadingRevision;
     NSInteger _failedRevision;
@@ -466,6 +467,7 @@ static void VCMSharedStateDidChange(CFNotificationCenterRef center,
         _failedRevision = -1;
         _captureOutputOrientation = -1;
         _captureOutputOrientationSupported = NO;
+        _captureOutputApplication = @"";
         _zoom = 1.0;
         _ciContext = [CIContext contextWithOptions:@{kCIContextUseSoftwareRenderer: @NO,
                                                       kCIContextCacheIntermediates: @NO}];
@@ -565,6 +567,8 @@ static void VCMSharedStateDidChange(CFNotificationCenterRef center,
     NSInteger captureOutputOrientation = [state[@"captureOutputOrientation"] integerValue];
     BOOL captureOutputOrientationSupported =
         [state[@"captureOutputOrientationSupported"] boolValue];
+    NSString *captureOutputApplication = [state[@"captureOutputApplication"] isKindOfClass:[NSString class]]
+        ? state[@"captureOutputApplication"] : @"";
     if (!captureOutputOrientationSupported ||
         captureOutputOrientation < 1 || captureOutputOrientation > 4) {
         captureOutputOrientation = -1;
@@ -589,6 +593,7 @@ static void VCMSharedStateDidChange(CFNotificationCenterRef center,
     _motionEnabled = [state[@"motionEnabled"] boolValue];
     _captureOutputOrientation = captureOutputOrientation;
     _captureOutputOrientationSupported = captureOutputOrientationSupported;
+    _captureOutputApplication = [captureOutputApplication copy];
 
     // Load the new revision in the background without discarding the last
     // valid frame. The old image/video remains on screen until decoding of the
@@ -979,6 +984,7 @@ static void VCMSharedStateDidChange(CFNotificationCenterRef center,
     BOOL motionEnabled = _motionEnabled;
     NSInteger captureOutputOrientation = _captureOutputOrientation;
     BOOL captureOutputOrientationSupported = _captureOutputOrientationSupported;
+    NSString *captureOutputApplication = [_captureOutputApplication copy] ?: @"";
     [_lock unlock];
 
     if (frameToRender.pixelBuffer) {
@@ -998,19 +1004,21 @@ static void VCMSharedStateDidChange(CFNotificationCenterRef center,
     }
     if (!sourceImage) return NULL;
 
-    // WhatsApp's portrait VideoDataOutput receives physically rotated buffers.
-    // BWNodeOutput runs before that connection transform, so pre-rotate the
-    // selected source only when the reported Portrait contract and landscape
-    // source-buffer geometry match the captured iPhone X route.
+    // WhatsApp's portrait VideoDataOutput route was observed receiving physically
+    // rotated buffers after BWNodeOutput. Keep this compensation isolated to that
+    // app and route signature so other camera clients retain their known-good output.
     CGImagePropertyOrientation outputCompensation = kCGImagePropertyOrientationUp;
     NSString *outputCompensationName = @"none";
     BOOL sourceBufferIsLandscape =
         CVPixelBufferGetWidth(templateBuffer) > CVPixelBufferGetHeight(templateBuffer);
-    if (captureOutputOrientationSupported &&
+    if ([captureOutputApplication isEqualToString:@"net.whatsapp.WhatsApp"] &&
+        captureOutputOrientationSupported &&
         captureOutputOrientation == 1 &&
         sourceBufferIsLandscape) {
-        outputCompensation = kCGImagePropertyOrientationRight;
-        outputCompensationName = @"right-90";
+        // The previous Right transform made the WhatsApp video-note image
+        // land head-down. Left is the inverse EXIF orientation for this route.
+        outputCompensation = kCGImagePropertyOrientationLeft;
+        outputCompensationName = @"whatsapp-left-90";
     }
 
     if (outputCompensation != kCGImagePropertyOrientationUp) {
