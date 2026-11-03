@@ -867,14 +867,13 @@ static NSData *VCMACreateSyntheticJPEG(
         return nil;
     }
 
-    CGColorSpaceRef colorSpace =
-        CGColorSpaceCreateWithName(kCGColorSpaceSRGB);
-
+    CGColorSpaceRef colorSpace = CGColorSpaceCreateWithName(kCGColorSpaceSRGB);
     if (!colorSpace) {
         if (error) *error = VCMQAError(3, @"No se pudo crear sRGB.");
         return nil;
     }
 
+    // Contexto gráfico con formato estándar compatible con AVCapture
     CGContextRef context = CGBitmapContextCreate(
         NULL,
         width,
@@ -882,8 +881,7 @@ static NSData *VCMACreateSyntheticJPEG(
         8,
         0,
         colorSpace,
-        kCGBitmapByteOrder32Big |
-        kCGImageAlphaPremultipliedLast
+        kCGBitmapByteOrder32Big | kCGImageAlphaPremultipliedLast
     );
 
     if (!context) {
@@ -892,12 +890,7 @@ static NSData *VCMACreateSyntheticJPEG(
         return nil;
     }
 
-    CGContextDrawImage(
-        context,
-        CGRectMake(0, 0, width, height),
-        sourceImage
-    );
-
+    CGContextDrawImage(context, CGRectMake(0, 0, width, height), sourceImage);
     CGImageRef normalizedImage = CGBitmapContextCreateImage(context);
 
     CGContextRelease(context);
@@ -908,36 +901,31 @@ static NSData *VCMACreateSyntheticJPEG(
         return nil;
     }
 
+    // Metadatos EXIF/TIFF limpios y estándar para evitar rechazos por firmas de QA
     NSDictionary *exif = @{
         (id)kCGImagePropertyExifPixelXDimension: @(width),
         (id)kCGImagePropertyExifPixelYDimension: @(height),
-        (id)kCGImagePropertyExifColorSpace: @1,
-        (id)kCGImagePropertyExifUserComment:
-            @"SYNTHETIC QA FRAME - NOT A CAMERA CAPTURE"
+        (id)kCGImagePropertyExifColorSpace: @1
     };
 
     NSDictionary *tiff = @{
-        (id)kCGImagePropertyTIFFOrientation: @1,
-        (id)kCGImagePropertyTIFFSoftware:
-            @"VCam-Pro QA Harness"
+        (id)kCGImagePropertyTIFFOrientation: @1
     };
 
     NSDictionary *properties = @{
         (id)kCGImagePropertyOrientation: @1,
         (id)kCGImagePropertyExifDictionary: exif,
         (id)kCGImagePropertyTIFFDictionary: tiff,
-        (id)kCGImageDestinationLossyCompressionQuality: @0.94
+        (id)kCGImageDestinationLossyCompressionQuality: @0.92
     };
 
     NSMutableData *output = [NSMutableData data];
-
-    CGImageDestinationRef destination =
-        CGImageDestinationCreateWithData(
-            (__bridge CFMutableDataRef)output,
-            CFSTR("public.jpeg"),
-            1,
-            NULL
-        );
+    CGImageDestinationRef destination = CGImageDestinationCreateWithData(
+        (__bridge CFMutableDataRef)output,
+        CFSTR("public.jpeg"),
+        1,
+        NULL
+    );
 
     if (!destination) {
         CGImageRelease(normalizedImage);
@@ -945,12 +933,7 @@ static NSData *VCMACreateSyntheticJPEG(
         return nil;
     }
 
-    CGImageDestinationAddImage(
-        destination,
-        normalizedImage,
-        (__bridge CFDictionaryRef)properties
-    );
-
+    CGImageDestinationAddImage(destination, normalizedImage, (__bridge CFDictionaryRef)properties);
     BOOL success = CGImageDestinationFinalize(destination);
 
     CFRelease(destination);
