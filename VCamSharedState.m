@@ -52,6 +52,7 @@ static BOOL VCamSendAll(int socketFD, const void *bytes, size_t length) {
     NSInteger _rotationDegrees;
     BOOL _mirrorEnabled;
     BOOL _motionEnabled;
+    BOOL _nativePhotoCaptureEnabled;
     CGFloat _buttonX;
     CGFloat _buttonY;
     NSString *_engineStatus;
@@ -91,6 +92,7 @@ static BOOL VCamSendAll(int socketFD, const void *bytes, size_t length) {
         _serverFD = -1;
         _zoom = 1.0;
         _rotationDegrees = 0;
+        _nativePhotoCaptureEnabled = YES;
         _buttonX = 0.92;
         _buttonY = 0.24;
         _mediaRevision = 0;
@@ -116,6 +118,9 @@ static BOOL VCamSendAll(int socketFD, const void *bytes, size_t length) {
             _rotationDegrees = ((_rotationDegrees + 45) / 90 * 90) % 360;
             _mirrorEnabled = [saved[@"mirrorEnabled"] boolValue];
             _motionEnabled = [saved[@"motionEnabled"] boolValue];
+            if ([saved[@"nativePhotoCaptureEnabled"] isKindOfClass:[NSNumber class]]) {
+                _nativePhotoCaptureEnabled = [saved[@"nativePhotoCaptureEnabled"] boolValue];
+            }
             _buttonX = MAX(0.04, MIN(0.96, [saved[@"buttonX"] doubleValue] ?: 0.92));
             _buttonY = MAX(0.04, MIN(0.96, [saved[@"buttonY"] doubleValue] ?: 0.24));
         }
@@ -231,6 +236,13 @@ static BOOL VCamSendAll(int socketFD, const void *bytes, size_t length) {
     return value;
 }
 
+- (BOOL)nativePhotoCaptureEnabled {
+    [_stateLock lock];
+    BOOL value = _nativePhotoCaptureEnabled;
+    [_stateLock unlock];
+    return value;
+}
+
 - (CGFloat)buttonX {
     [_stateLock lock];
     CGFloat value = _buttonX;
@@ -259,6 +271,7 @@ static BOOL VCamSendAll(int socketFD, const void *bytes, size_t length) {
         @"rotationDegrees": @(_rotationDegrees),
         @"mirrorEnabled": @(_mirrorEnabled),
         @"motionEnabled": @(_motionEnabled),
+        @"nativePhotoCaptureEnabled": @(_nativePhotoCaptureEnabled),
         @"buttonX": @(_buttonX),
         @"buttonY": @(_buttonY),
         @"engineStatus": _engineStatus ?: @"not_reported",
@@ -403,6 +416,15 @@ static BOOL VCamSendAll(int socketFD, const void *bytes, size_t length) {
     [self publishChange];
 }
 
+- (void)setNativePhotoCaptureEnabled:(BOOL)enabled {
+    [_stateLock lock];
+    _nativePhotoCaptureEnabled = enabled;
+    _stateRevision += 1;
+    [self persistLocked];
+    [_stateLock unlock];
+    [self publishChange];
+}
+
 - (void)setTransformWithZoom:(CGFloat)zoom
                     offsetX:(CGFloat)offsetX
                     offsetY:(CGFloat)offsetY
@@ -534,6 +556,7 @@ static BOOL VCamSendAll(int socketFD, const void *bytes, size_t length) {
     NSNumber *rotationDegrees = control[@"rotationDegrees"];
     NSNumber *mirrorEnabled = control[@"mirrorEnabled"];
     NSNumber *motionEnabled = control[@"motionEnabled"];
+    NSNumber *nativePhotoCaptureEnabled = control[@"nativePhotoCaptureEnabled"];
     NSNumber *buttonX = control[@"buttonX"];
     NSNumber *buttonY = control[@"buttonY"];
 
@@ -553,6 +576,9 @@ static BOOL VCamSendAll(int socketFD, const void *bytes, size_t length) {
     }
     if ([mirrorEnabled isKindOfClass:[NSNumber class]]) _mirrorEnabled = mirrorEnabled.boolValue;
     if ([motionEnabled isKindOfClass:[NSNumber class]]) _motionEnabled = motionEnabled.boolValue;
+    if ([nativePhotoCaptureEnabled isKindOfClass:[NSNumber class]]) {
+        _nativePhotoCaptureEnabled = nativePhotoCaptureEnabled.boolValue;
+    }
     if ([buttonX isKindOfClass:[NSNumber class]] && isfinite(buttonX.doubleValue)) {
         _buttonX = MAX(0.04, MIN(0.96, buttonX.doubleValue));
     }

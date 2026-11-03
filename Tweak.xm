@@ -32,6 +32,7 @@ static const CGFloat kVCamButtonMargin = 12.0;
 
 static BOOL g_isSpringBoardProcess = NO;
 static BOOL g_vcamEnabled = NO;
+static BOOL g_vcamNativePhotoCaptureEnabled = YES;
 static CGFloat g_vcamZoom = 1.0;
 static CGFloat g_vcamOffsetX = 0.0;
 static CGFloat g_vcamOffsetY = 0.0;
@@ -100,6 +101,18 @@ static BOOL VCamIsEnabled(void) {
 static void VCamSetLocalEnabled(BOOL enabled) {
     @synchronized ([MediaManager class]) {
         g_vcamEnabled = enabled;
+    }
+}
+
+static BOOL VCamNativePhotoCaptureEnabled(void) {
+    @synchronized ([MediaManager class]) {
+        return g_vcamNativePhotoCaptureEnabled;
+    }
+}
+
+static void VCamSetLocalNativePhotoCaptureEnabled(BOOL enabled) {
+    @synchronized ([MediaManager class]) {
+        g_vcamNativePhotoCaptureEnabled = enabled;
     }
 }
 
@@ -333,6 +346,10 @@ static void VCamRefreshFromServer(void) {
         if (!state) return;
 
         BOOL enabled = [state[@"enabled"] boolValue];
+        NSNumber *nativePhotoCaptureValue = [state[@"nativePhotoCaptureEnabled"] isKindOfClass:[NSNumber class]]
+            ? state[@"nativePhotoCaptureEnabled"] : nil;
+        BOOL nativePhotoCaptureEnabled = nativePhotoCaptureValue
+            ? nativePhotoCaptureValue.boolValue : YES;
         NSInteger mediaRevision = [state[@"mediaRevision"] integerValue];
         NSInteger stateRevision = [state[@"stateRevision"] integerValue];
         CGFloat zoom = [state[@"zoom"] doubleValue];
@@ -345,6 +362,7 @@ static void VCamRefreshFromServer(void) {
         CGFloat buttonY = [state[@"buttonY"] doubleValue];
 
         VCamSetLocalEnabled(enabled);
+        VCamSetLocalNativePhotoCaptureEnabled(nativePhotoCaptureEnabled);
         VCamSetPreviewOverlaysVisible(enabled);
         g_vcamZoom = MAX(0.5, MIN(4.0, zoom));
         g_vcamOffsetX = MAX(-1.0, MIN(1.0, offsetX));
@@ -1068,7 +1086,8 @@ static NSData *VCamReplacementDataForPhoto(AVCapturePhoto *photo) {
 
 - (CGImageRef)previewCGImageRepresentation {
     CGImageRef original = %orig;
-    if (!original || !VCamIsEnabled() || ![MediaManager sharedManager].isReady) return original;
+    if (VCamNativePhotoCaptureEnabled() || !original ||
+        !VCamIsEnabled() || ![MediaManager sharedManager].isReady) return original;
 
     NSData *virtualJPEG = VCamReplacementDataForPhoto(self);
     if (!virtualJPEG.length) return original;
@@ -1088,7 +1107,8 @@ static NSData *VCamReplacementDataForPhoto(AVCapturePhoto *photo) {
 
 - (NSData *)fileDataRepresentation {
     NSData *original = %orig;
-    if (!VCamIsEnabled() || ![MediaManager sharedManager].isReady) return original;
+    if (VCamNativePhotoCaptureEnabled() ||
+        !VCamIsEnabled() || ![MediaManager sharedManager].isReady) return original;
 
     // JPEG, PNG y HEIC pueden regenerarse desde la imagen virtual. RAW y
     // contenedores desconocidos se conservan para no devolver datos corruptos.
@@ -1112,7 +1132,8 @@ static NSData *VCamReplacementDataForPhoto(AVCapturePhoto *photo) {
 %hook AVCaptureStillImageOutput
 
 + (NSData *)jpegStillImageNSDataRepresentation:(CMSampleBufferRef)jpegSampleBuffer {
-    if (VCamIsEnabled() && [MediaManager sharedManager].isReady) {
+    if (!VCamNativePhotoCaptureEnabled() &&
+        VCamIsEnabled() && [MediaManager sharedManager].isReady) {
         NSData *replacement = [[MediaManager sharedManager] nextPhotoData];
         if (replacement.length > 0 && VCamIsJPEGData(replacement)) {
             NSLog(@"[VCam Pro] Conversión JPEG de AVCaptureStillImageOutput sustituida.");
@@ -1919,7 +1940,12 @@ static void VCamShowMenu(void) {
     if (!g_overlayController || g_overlayController.presentedViewController ||
         [UIApplication sharedApplication].applicationState != UIApplicationStateActive) return;
 
-    NSString *message = [VCamSharedState sharedState].enabled ? @"Cámara virtual activada" : @"Cámara virtual desactivada";
+    VCamSharedState *sharedState = [VCamSharedState sharedState];
+    NSString *cameraStatus = sharedState.enabled ? @"Cámara virtual activada" : @"Cámara virtual desactivada";
+    NSString *photoStatus = sharedState.nativePhotoCaptureEnabled
+        ? @"Captura fotográfica nativa activada"
+        : @"Captura fotográfica virtual activada";
+    NSString *message = [NSString stringWithFormat:@"%@\n%@", cameraStatus, photoStatus];
     UIAlertController *menu = [UIAlertController alertControllerWithTitle:@"VCam Pro"
                                                                   message:message
                                                            preferredStyle:UIAlertControllerStyleActionSheet];
@@ -1950,6 +1976,18 @@ static void VCamShowMenu(void) {
     NSString *framingTitle = g_adjustmentPanel
         ? @"Cerrar vista previa y encuadre"
         : @"Vista previa y encuadre";
+    NSString *photoCaptureTitle = sharedState.nativePhotoCaptureEnabled
+        ? @"Desactivar captura fotográfica nativa"
+        : @"Activar captura fotográfica nativa";
+    [menu addAction:[UIAlertAction actionWithTitle:photoCaptureTitle
+                                             style:UIAlertActionStyleDefault
+                                           handler:^(__unused UIAlertAction *action) {
+        BOOL nextEnabled = ![VCamSharedState sharedState].nativePhotoCaptureEnabled;
+        [[VCamSharedState sharedState] setNativePhotoCaptureEnabled:nextEnabled];
+        VCamSetLocalNativePhotoCaptureEnabled(nextEnabled);
+        NSLog(@"[VCam Pro] Captura fotográfica nativa %@.", nextEnabled ? @"activada" : @"desactivada");
+    }]];
+
     [menu addAction:[UIAlertAction actionWithTitle:framingTitle
                                              style:UIAlertActionStyleDefault
                                            handler:^(UIAlertAction *action) {

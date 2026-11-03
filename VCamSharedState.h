@@ -17,6 +17,7 @@ NS_ASSUME_NONNULL_BEGIN
 @property (nonatomic, assign, readonly) NSInteger rotationDegrees;
 @property (nonatomic, assign, readonly) BOOL mirrorEnabled;
 @property (nonatomic, assign, readonly) BOOL motionEnabled;
+@property (nonatomic, assign, readonly) BOOL nativePhotoCaptureEnabled;
 @property (nonatomic, assign, readonly) CGFloat buttonX;
 @property (nonatomic, assign, readonly) CGFloat buttonY;
 
@@ -32,6 +33,7 @@ NS_ASSUME_NONNULL_BEGIN
 - (void)setEnabled:(BOOL)enabled;
 - (void)setMirrorEnabled:(BOOL)enabled;
 - (void)setMotionEnabled:(BOOL)enabled;
+- (void)setNativePhotoCaptureEnabled:(BOOL)enabled;
 - (void)setTransformWithZoom:(CGFloat)zoom
                     offsetX:(CGFloat)offsetX
                     offsetY:(CGFloat)offsetY

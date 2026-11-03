@@ -5,6 +5,7 @@ on:
     branches:
       - main
       - fix/avfoundation-orientation
+      - feature/native-photo-capture-mode
     tags:
       - 'v*'
 
