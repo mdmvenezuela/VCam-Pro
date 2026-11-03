@@ -1309,101 +1309,291 @@ static NSError *VCMQAError(NSInteger code, NSString *message) {
     }];
 }
 
-static NSData *VCMACreateSyntheticJPEG(
-    CGImageRef sourceImage,
+static NSData *VCAMSerializeImageData(
+    NSData *sourceData,
+    NSString *destinationUTI,
+    CGImagePropertyOrientation captureOrientation,
     NSError **error
 ) {
-    if (!sourceImage) {
-        if (error) *error = VCMQAError(1, @"Imagen de entrada nula.");
-        return nil;
-    }
+    @autoreleasepool {
+        if (!sourceData.length) {
+            if (error) *error = VCMQAError(1, @"Datos de imagen vacíos.");
+            return nil;
+        }
 
-    size_t width = CGImageGetWidth(sourceImage);
-    size_t height = CGImageGetHeight(sourceImage);
+        BOOL isJPEG = [destinationUTI isEqualToString:@"public.jpeg"];
+        BOOL isHEIC = [destinationUTI isEqualToString:@"public.heic"];
+        if (!isJPEG && !isHEIC) {
+            if (error) *error = VCMQAError(2, @"Contenedor de imagen no admitido.");
+            return nil;
+        }
 
-    if (!width || !height || width > 12000 || height > 12000) {
-        if (error) *error = VCMQAError(2, @"Dimensiones no válidas.");
-        return nil;
-    }
+        CFStringRef destinationType = (__bridge CFStringRef)destinationUTI;
+        CFArrayRef supportedTypes = CGImageDestinationCopyTypeIdentifiers();
+        if (!supportedTypes) {
+            if (error) *error = VCMQAError(3, @"ImageIO no informó formatos de salida.");
+            return nil;
+        }
 
-    CGColorSpaceRef colorSpace = CGColorSpaceCreateWithName(kCGColorSpaceSRGB);
-    if (!colorSpace) {
-        if (error) *error = VCMQAError(3, @"No se pudo crear sRGB.");
-        return nil;
-    }
+        BOOL destinationSupported =
+            CFArrayContainsValue(supportedTypes,
+                                 CFRangeMake(0, CFArrayGetCount(supportedTypes)),
+                                 destinationType);
+        CFRelease(supportedTypes);
 
-    // Contexto gráfico con formato estándar compatible con AVCapture
-    CGContextRef context = CGBitmapContextCreate(
-        NULL,
-        width,
-        height,
-        8,
-        0,
-        colorSpace,
-        kCGBitmapByteOrder32Big | kCGImageAlphaPremultipliedLast
-    );
+        if (!destinationSupported) {
+            if (error) *error = VCMQAError(
+                4,
+                isHEIC
+                    ? @"Este dispositivo no admite codificación HEIC."
+                    : @"Este dispositivo no admite codificación JPEG."
+            );
+            return nil;
+        }
 
-    if (!context) {
-        CGColorSpaceRelease(colorSpace);
-        if (error) *error = VCMQAError(4, @"No se pudo crear el contexto.");
-        return nil;
-    }
+        CGImageSourceRef source = CGImageSourceCreateWithData(
+            (__bridge CFDataRef)sourceData, NULL
+        );
+        if (!source || CGImageSourceGetCount(source) == 0) {
+            if (source) CFRelease(source);
+            if (error) *error = VCMQAError(5, @"ImageIO no pudo abrir la imagen de reemplazo.");
+            return nil;
+        }
 
-    CGContextDrawImage(context, CGRectMake(0, 0, width, height), sourceImage);
-    CGImageRef normalizedImage = CGBitmapContextCreateImage(context);
+        CFDictionaryRef sourceProperties =
+            CGImageSourceCopyPropertiesAtIndex(source, 0, NULL);
+        if (!sourceProperties) {
+            CFRelease(source);
+            if (error) *error = VCMQAError(6, @"No se pudieron leer las dimensiones originales.");
+            return nil;
+        }
 
-    CGContextRelease(context);
-    CGColorSpaceRelease(colorSpace);
+        int64_t sourceWidth = 0;
+        int64_t sourceHeight = 0;
+        CFNumberRef widthNumber = (CFNumberRef)CFDictionaryGetValue(
+            sourceProperties, kCGImagePropertyPixelWidth
+        );
+        CFNumberRef heightNumber = (CFNumberRef)CFDictionaryGetValue(
+            sourceProperties, kCGImagePropertyPixelHeight
+        );
 
-    if (!normalizedImage) {
-        if (error) *error = VCMQAError(5, @"Falló la normalización.");
-        return nil;
-    }
+        if (widthNumber && CFGetTypeID(widthNumber) == CFNumberGetTypeID()) {
+            CFNumberGetValue(widthNumber, kCFNumberSInt64Type, &sourceWidth);
+        }
+        if (heightNumber && CFGetTypeID(heightNumber) == CFNumberGetTypeID()) {
+            CFNumberGetValue(heightNumber, kCFNumberSInt64Type, &sourceHeight);
+        }
 
-    // Metadatos EXIF/TIFF limpios y estándar para evitar rechazos por firmas de QA
-    NSDictionary *exif = @{
-        (id)kCGImagePropertyExifPixelXDimension: @(width),
-        (id)kCGImagePropertyExifPixelYDimension: @(height),
-        (id)kCGImagePropertyExifColorSpace: @1
-    };
+        if (sourceWidth <= 0 || sourceHeight <= 0 ||
+            sourceWidth > 12000 || sourceHeight > 12000) {
+            CFRelease(sourceProperties);
+            CFRelease(source);
+            if (error) *error = VCMQAError(7, @"Dimensiones de imagen fuera de rango.");
+            return nil;
+        }
 
-    NSDictionary *tiff = @{
-        (id)kCGImagePropertyTIFFOrientation: @1
-    };
+        NSUInteger maximumDimension =
+            (NSUInteger)MAX(sourceWidth, sourceHeight);
 
-    NSDictionary *properties = @{
-        (id)kCGImagePropertyOrientation: @1,
-        (id)kCGImagePropertyExifDictionary: exif,
-        (id)kCGImagePropertyTIFFDictionary: tiff,
-        (id)kCGImageDestinationLossyCompressionQuality: @0.92
-    };
+        NSDictionary *thumbnailOptions = @{
+            (__bridge NSString *)kCGImageSourceCreateThumbnailFromImageAlways: @YES,
+            (__bridge NSString *)kCGImageSourceCreateThumbnailWithTransform: @YES,
+            (__bridge NSString *)kCGImageSourceThumbnailMaxPixelSize: @(maximumDimension),
+            (__bridge NSString *)kCGImageSourceShouldCacheImmediately: @YES
+        };
 
-    NSMutableData *output = [NSMutableData data];
-    CGImageDestinationRef destination = CGImageDestinationCreateWithData(
-        (__bridge CFMutableDataRef)output,
-        CFSTR("public.jpeg"),
-        1,
-        NULL
-    );
+        CGImageRef thumbnail = CGImageSourceCreateThumbnailAtIndex(
+            source, 0, (__bridge CFDictionaryRef)thumbnailOptions
+        );
 
-    if (!destination) {
+        CFRelease(sourceProperties);
+        CFRelease(source);
+
+        if (!thumbnail) {
+            if (error) *error = VCMQAError(8, @"No se pudo normalizar la orientación EXIF de origen.");
+            return nil;
+        }
+
+        // MediaManager entrega el reemplazo ya compuesto en orientación Up.
+        // Para mantener el contrato visual de AVCapturePhoto, la orientación de
+        // la captura original se aplica físicamente antes de escribir EXIF/TIFF = 1.
+        if (captureOrientation < kCGImagePropertyOrientationUp ||
+            captureOrientation > kCGImagePropertyOrientationLeftMirrored) {
+            captureOrientation = kCGImagePropertyOrientationUp;
+        }
+
+        CGImageRef captureOrientedImage = NULL;
+        CGImageRef imageToRender = thumbnail;
+
+        if (captureOrientation != kCGImagePropertyOrientationUp) {
+            CGColorSpaceRef ciColorSpace =
+                CGColorSpaceCreateWithName(kCGColorSpaceSRGB);
+
+            CIContext *ciContext = ciColorSpace
+                ? [CIContext contextWithOptions:@{
+                    kCIContextWorkingColorSpace: (__bridge id)ciColorSpace,
+                    kCIContextOutputColorSpace: (__bridge id)ciColorSpace
+                }]
+                : [CIContext contextWithOptions:nil];
+
+            if (ciColorSpace) CGColorSpaceRelease(ciColorSpace);
+
+            CIImage *ciImage = [CIImage imageWithCGImage:thumbnail];
+            CIImage *orientedCIImage =
+                [ciImage imageByApplyingOrientation:(int32_t)captureOrientation];
+            CGRect orientedExtent = CGRectIntegral(orientedCIImage.extent);
+
+            if (ciContext && !CGRectIsEmpty(orientedExtent)) {
+                captureOrientedImage = [ciContext createCGImage:orientedCIImage
+                                                        fromRect:orientedExtent];
+            }
+
+            if (!captureOrientedImage) {
+                CGImageRelease(thumbnail);
+                if (error) *error = VCMQAError(9, @"No se pudo aplicar físicamente la orientación de captura.");
+                return nil;
+            }
+
+            imageToRender = captureOrientedImage;
+        }
+
+        size_t width = CGImageGetWidth(imageToRender);
+        size_t height = CGImageGetHeight(imageToRender);
+        if (!width || !height || width > 12000 || height > 12000 ||
+            width > (SIZE_MAX - 63) / 4) {
+            if (captureOrientedImage) CGImageRelease(captureOrientedImage);
+            CGImageRelease(thumbnail);
+            if (error) *error = VCMQAError(10, @"Dimensiones finales no válidas.");
+            return nil;
+        }
+
+        size_t minimumBytesPerRow = width * 4;
+        size_t bytesPerRow =
+            (minimumBytesPerRow + 63) & ~((size_t)63);
+
+        if (height > SIZE_MAX / bytesPerRow) {
+            if (captureOrientedImage) CGImageRelease(captureOrientedImage);
+            CGImageRelease(thumbnail);
+            if (error) *error = VCMQAError(11, @"El búfer de imagen excede el límite de memoria.");
+            return nil;
+        }
+
+        CGColorSpaceRef sRGB =
+            CGColorSpaceCreateWithName(kCGColorSpaceSRGB);
+        if (!sRGB) {
+            if (captureOrientedImage) CGImageRelease(captureOrientedImage);
+            CGImageRelease(thumbnail);
+            if (error) *error = VCMQAError(12, @"No se pudo crear el espacio de color sRGB.");
+            return nil;
+        }
+
+        CGContextRef bitmapContext = CGBitmapContextCreate(
+            NULL,
+            width,
+            height,
+            8,
+            bytesPerRow,
+            sRGB,
+            kCGImageAlphaPremultipliedLast | kCGBitmapByteOrder32Big
+        );
+
+        if (!bitmapContext) {
+            CGColorSpaceRelease(sRGB);
+            if (captureOrientedImage) CGImageRelease(captureOrientedImage);
+            CGImageRelease(thumbnail);
+            if (error) *error = VCMQAError(13, @"No se pudo crear el contexto RGBA sRGB.");
+            return nil;
+        }
+
+        CGContextSetRenderingIntent(bitmapContext, kCGRenderingIntentDefault);
+        CGContextSetInterpolationQuality(bitmapContext, kCGInterpolationHigh);
+
+        // Aplanar transparencia sobre blanco antes de codificar JPEG/HEIC.
+        CGContextSetBlendMode(bitmapContext, kCGBlendModeCopy);
+        CGContextSetRGBFillColor(bitmapContext, 1.0, 1.0, 1.0, 1.0);
+        CGContextFillRect(bitmapContext, CGRectMake(0, 0, width, height));
+        CGContextSetBlendMode(bitmapContext, kCGBlendModeNormal);
+        CGContextDrawImage(
+            bitmapContext,
+            CGRectMake(0, 0, width, height),
+            imageToRender
+        );
+
+        CGImageRef normalizedImage =
+            CGBitmapContextCreateImage(bitmapContext);
+
+        CGContextRelease(bitmapContext);
+        CGColorSpaceRelease(sRGB);
+        if (captureOrientedImage) CGImageRelease(captureOrientedImage);
+        CGImageRelease(thumbnail);
+
+        if (!normalizedImage) {
+            if (error) *error = VCMQAError(14, @"No se pudo crear la imagen sRGB final.");
+            return nil;
+        }
+
+        size_t finalWidth = CGImageGetWidth(normalizedImage);
+        size_t finalHeight = CGImageGetHeight(normalizedImage);
+
+        NSDictionary *exifProperties = @{
+            (__bridge NSString *)kCGImagePropertyExifPixelXDimension: @(finalWidth),
+            (__bridge NSString *)kCGImagePropertyExifPixelYDimension: @(finalHeight),
+            (__bridge NSString *)kCGImagePropertyExifColorSpace: @1
+        };
+
+        NSDictionary *tiffProperties = @{
+            (__bridge NSString *)kCGImagePropertyTIFFImageWidth: @(finalWidth),
+            (__bridge NSString *)kCGImagePropertyTIFFImageLength: @(finalHeight),
+            (__bridge NSString *)kCGImagePropertyTIFFOrientation: @1
+        };
+
+        NSDictionary *destinationProperties = @{
+            (__bridge NSString *)kCGImagePropertyPixelWidth: @(finalWidth),
+            (__bridge NSString *)kCGImagePropertyPixelHeight: @(finalHeight),
+            (__bridge NSString *)kCGImagePropertyOrientation: @1,
+            (__bridge NSString *)kCGImagePropertyExifDictionary: exifProperties,
+            (__bridge NSString *)kCGImagePropertyTIFFDictionary: tiffProperties,
+            (__bridge NSString *)kCGImageDestinationLossyCompressionQuality: @0.94
+        };
+
+        CFMutableDataRef outputData =
+            CFDataCreateMutable(kCFAllocatorDefault, 0);
+        if (!outputData) {
+            CGImageRelease(normalizedImage);
+            if (error) *error = VCMQAError(15, @"No se pudo reservar el búfer de salida.");
+            return nil;
+        }
+
+        CGImageDestinationRef destination = CGImageDestinationCreateWithData(
+            outputData, destinationType, 1, NULL
+        );
+
+        if (!destination) {
+            CFRelease(outputData);
+            CGImageRelease(normalizedImage);
+            if (error) *error = VCMQAError(16, @"No se pudo crear CGImageDestination.");
+            return nil;
+        }
+
+        CGImageDestinationAddImage(
+            destination,
+            normalizedImage,
+            (__bridge CFDictionaryRef)destinationProperties
+        );
+
+        BOOL finalized = CGImageDestinationFinalize(destination);
+        CFRelease(destination);
         CGImageRelease(normalizedImage);
-        if (error) *error = VCMQAError(6, @"No se pudo crear el destino JPEG.");
-        return nil;
+
+        if (!finalized || CFDataGetLength(outputData) == 0) {
+            CFRelease(outputData);
+            if (error) *error = VCMQAError(17, @"ImageIO no pudo finalizar el contenedor de salida.");
+            return nil;
+        }
+
+        NSData *result = CFBridgingRelease(outputData);
+        return result;
     }
-
-    CGImageDestinationAddImage(destination, normalizedImage, (__bridge CFDictionaryRef)properties);
-    BOOL success = CGImageDestinationFinalize(destination);
-
-    CFRelease(destination);
-    CGImageRelease(normalizedImage);
-
-    if (!success || output.length == 0) {
-        if (error) *error = VCMQAError(7, @"No se pudo finalizar el JPEG.");
-        return nil;
-    }
-
-    return [output copy];
 }
 
 static char kVCamPhotoReplacementDataKey;
@@ -1423,21 +1613,23 @@ static NSData *VCamReplacementDataForPhoto(AVCapturePhoto *photo) {
     return generated;
 }
 
-// Returns the stored EXIF orientation (1-8), or -1 when the JPEG has no
-// readable orientation tag. Used only for diagnostics; synthetic output is
-// deliberately normalized to EXIF/TIFF Up by VCMACreateSyntheticJPEG.
-static NSInteger VCamReadJPEGExifOrientation(NSData *jpegData) {
-    if (!jpegData.length) return -1;
+// Reads the EXIF orientation from a JPEG or HEIC AVCapturePhoto container.
+static NSInteger VCamReadImageExifOrientation(NSData *imageData) {
+    if (!imageData.length) return -1;
 
-    CGImageSourceRef source = CGImageSourceCreateWithData((__bridge CFDataRef)jpegData, NULL);
+    CGImageSourceRef source =
+        CGImageSourceCreateWithData((__bridge CFDataRef)imageData, NULL);
     if (!source) return -1;
 
-    CFDictionaryRef properties = CGImageSourceCopyPropertiesAtIndex(source, 0, NULL);
+    CFDictionaryRef properties =
+        CGImageSourceCopyPropertiesAtIndex(source, 0, NULL);
     CFRelease(source);
 
     NSInteger orientation = -1;
     if (properties) {
-        CFTypeRef value = CFDictionaryGetValue(properties, kCGImagePropertyOrientation);
+        CFTypeRef value = CFDictionaryGetValue(
+            properties, kCGImagePropertyOrientation
+        );
         if (value && CFGetTypeID(value) == CFNumberGetTypeID()) {
             int rawValue = 1;
             if (CFNumberGetValue((CFNumberRef)value, kCFNumberIntType, &rawValue) &&
@@ -1472,89 +1664,56 @@ static NSInteger VCamReadJPEGExifOrientation(NSData *jpegData) {
 
 - (NSData *)fileDataRepresentation {
     NSData *original = %orig;
-    if (!VCamIsEnabled() || ![MediaManager sharedManager].isReady) return original;
-
-    NSString *uti = VCamDetectedImageUTI(original);
-    if (![uti isEqualToString:@"public.jpeg"]) {
+    if (!original.length ||
+        !VCamIsEnabled() ||
+        ![MediaManager sharedManager].isReady) {
         return original;
     }
+
+    NSString *containerUTI = VCamDetectedImageUTI(original);
+    BOOL supportedContainer =
+        [containerUTI isEqualToString:@"public.jpeg"] ||
+        [containerUTI isEqualToString:@"public.heic"];
+
+    if (!supportedContainer) return original;
 
     NSData *virtualJPEG = VCamReplacementDataForPhoto(self);
     if (!virtualJPEG.length || !VCamIsJPEGData(virtualJPEG)) {
         return original;
     }
 
-    NSInteger originalExifOrientation = VCamReadJPEGExifOrientation(original);
-    NSInteger replacementExifOrientation = VCamReadJPEGExifOrientation(virtualJPEG);
+    NSInteger rawCaptureOrientation =
+        VCamReadImageExifOrientation(original);
 
-    CGImageSourceRef imageSource = CGImageSourceCreateWithData((__bridge CFDataRef)virtualJPEG, NULL);
-    if (!imageSource) return original;
+    CGImagePropertyOrientation captureOrientation =
+        (rawCaptureOrientation >= 1 && rawCaptureOrientation <= 8)
+            ? (CGImagePropertyOrientation)rawCaptureOrientation
+            : kCGImagePropertyOrientationUp;
 
-    CGImageRef sourceImage = CGImageSourceCreateImageAtIndex(imageSource, 0, NULL);
-    CFRelease(imageSource);
-    if (!sourceImage) return original;
+    NSError *serializationError = nil;
+    NSData *serializedData = VCAMSerializeImageData(
+        virtualJPEG,
+        containerUTI,
+        captureOrientation,
+        &serializationError
+    );
 
-    size_t sourceWidth = CGImageGetWidth(sourceImage);
-    size_t sourceHeight = CGImageGetHeight(sourceImage);
-
-    NSError *error = nil;
-    NSData *syntheticJPEG = VCMACreateSyntheticJPEG(sourceImage, &error);
-    CGImageRelease(sourceImage);
-    if (!syntheticJPEG.length || !VCamIsJPEGData(syntheticJPEG)) {
-        NSLog(@"[VCam Pro] No se pudo normalizar el JPEG sintético; se conserva la foto original: %@.", error);
+    if (!serializedData.length) {
+        NSLog(@"[VCam Pro] No se pudo serializar la foto %@; se conserva la captura original: %@",
+              containerUTI,
+              serializationError.localizedDescription ?: @"error desconocido");
         return original;
     }
 
-    // On this iPhone capture route, AVCapturePhoto's original EXIF orientation
-    // is part of the coordinate contract expected by file consumers. Restore
-    // that tag after generating the clean, synthetic JPEG (whose pixels and
-    // default EXIF/TIFF orientation are normalized to Up).
-    NSInteger safeOriginalOrientation =
-        (originalExifOrientation >= 1 && originalExifOrientation <= 8)
-            ? originalExifOrientation : (NSInteger)kCGImagePropertyOrientationUp;
-
-    if (safeOriginalOrientation != (NSInteger)kCGImagePropertyOrientationUp) {
-        CGImageSourceRef syntheticSource =
-            CGImageSourceCreateWithData((__bridge CFDataRef)syntheticJPEG, NULL);
-        if (syntheticSource) {
-            CGImageRef syntheticImage = CGImageSourceCreateImageAtIndex(syntheticSource, 0, NULL);
-            CFRelease(syntheticSource);
-            if (syntheticImage) {
-                NSMutableData *taggedOutput = [NSMutableData data];
-                CGImageDestinationRef destination = CGImageDestinationCreateWithData(
-                    (__bridge CFMutableDataRef)taggedOutput, CFSTR("public.jpeg"), 1, NULL);
-                if (destination) {
-                    NSDictionary *properties = @{
-                        (id)kCGImagePropertyOrientation: @(safeOriginalOrientation),
-                        (id)kCGImageDestinationLossyCompressionQuality: @0.94
-                    };
-                    CGImageDestinationAddImage(destination, syntheticImage,
-                                               (__bridge CFDictionaryRef)properties);
-                    if (CGImageDestinationFinalize(destination) && taggedOutput.length > 0) {
-                        syntheticJPEG = [taggedOutput copy];
-                    }
-                    CFRelease(destination);
-                }
-                CGImageRelease(syntheticImage);
-            }
-        }
+    NSString *serializedUTI = VCamDetectedImageUTI(serializedData);
+    if (![serializedUTI isEqualToString:containerUTI]) {
+        NSLog(@"[VCam Pro] El contenedor de salida no coincide (%@ != %@); se conserva el original.",
+              serializedUTI ?: @"desconocido",
+              containerUTI);
+        return original;
     }
 
-    NSInteger outputExifOrientation = VCamReadJPEGExifOrientation(syntheticJPEG);
-    NSString *diagnostic = [NSString stringWithFormat:
-        @"[VCam Pro/OrientationDiag] PHOTO_EXIF_RESTORE app=%@ originalEXIF=%ld replacementEXIF=%ld outputEXIF=%ld pixels=%zux%zu originalBytes=%lu outputBytes=%lu",
-        NSBundle.mainBundle.bundleIdentifier ?: @"(sin bundle)",
-        (long)originalExifOrientation,
-        (long)replacementExifOrientation,
-        (long)outputExifOrientation,
-        sourceWidth,
-        sourceHeight,
-        (unsigned long)original.length,
-        (unsigned long)syntheticJPEG.length];
-    NSLog(@"%@", diagnostic);
-    VCamAppendOrientationDiagnosticLine(diagnostic);
-
-    return syntheticJPEG;
+    return serializedData;
 }
 
 %end
