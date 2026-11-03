@@ -45,31 +45,49 @@ static const uint16_t kVCMStatusPort = 47831;
 
 static _Atomic(uint32_t) g_vcmOrientationDiagnosticCount = 0;
 
+static BOOL VCMSendStatusBytes(int fd, const void *bytes, size_t length);
+
 static void VCMAppendOrientationDiagnostic(NSString *message) {
     if (![message isKindOfClass:[NSString class]] || message.length == 0) return;
-    const char *directory = "/var/mobile/Documents";
-    mkdir(directory, 0755);
-    const char *path = "/var/mobile/Documents/VCam-OrientationDiag.log";
-    int fd = open(path, O_WRONLY | O_CREAT | O_APPEND, 0644);
-    if (fd < 0) {
-        NSLog(@"[VCam Pro/OrientationDiag] No se pudo abrir el archivo de diagnóstico: %s", strerror(errno));
-        return;
-    }
-    NSString *line = [message stringByAppendingString:@"\n"];
-    NSData *data = [line dataUsingEncoding:NSUTF8StringEncoding];
-    const uint8_t *bytes = data.bytes;
-    size_t remaining = data.length;
-    while (remaining > 0) {
-        ssize_t written = write(fd, bytes, remaining);
-        if (written < 0) {
-            if (errno == EINTR) continue;
-            break;
+    NSString *safeMessage = [message copy];
+
+    dispatch_async(dispatch_get_global_queue(QOS_CLASS_UTILITY, 0), ^{
+        NSDictionary *payload = @{ @"message": safeMessage };
+        NSError *jsonError = nil;
+        NSData *body = [NSJSONSerialization dataWithJSONObject:payload options:0 error:&jsonError];
+        if (!body || body.length == 0 || body.length > 4096) return;
+
+        int fd = socket(AF_INET, SOCK_STREAM, 0);
+        if (fd < 0) return;
+        int noSignal = 1;
+        setsockopt(fd, SOL_SOCKET, SO_NOSIGPIPE, &noSignal, sizeof(noSignal));
+        struct timeval timeout = {1, 0};
+        setsockopt(fd, SOL_SOCKET, SO_RCVTIMEO, &timeout, sizeof(timeout));
+        setsockopt(fd, SOL_SOCKET, SO_SNDTIMEO, &timeout, sizeof(timeout));
+
+        struct sockaddr_in address;
+        memset(&address, 0, sizeof(address));
+        address.sin_len = sizeof(address);
+        address.sin_family = AF_INET;
+        address.sin_port = htons(kVCMStatusPort);
+        address.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
+        if (connect(fd, (struct sockaddr *)&address, sizeof(address)) != 0) {
+            close(fd);
+            return;
         }
-        if (written == 0) break;
-        bytes += written;
-        remaining -= (size_t)written;
-    }
-    close(fd);
+
+        NSString *header = [NSString stringWithFormat:
+            @"POST /orientation-diagnostic HTTP/1.1\\r\\n"
+             "Host: 127.0.0.1\\r\\n"
+             "Content-Type: application/json\\r\\n"
+             "Content-Length: %lu\\r\\n"
+             "Connection: close\\r\\n\\r\\n",
+            (unsigned long)body.length];
+        BOOL sent = VCMSendStatusBytes(fd, header.UTF8String, header.length) &&
+                    VCMSendStatusBytes(fd, body.bytes, body.length);
+        (void)sent;
+        close(fd);
+    });
 }
 
 static NSString *VCMDescribeDictionaryKeys(CFDictionaryRef dictionary) {
