@@ -842,65 +842,126 @@ static NSString *VCamDetectedImageUTI(NSData *data) {
     return nil;
 }
 
-static NSData *VCamEncodeJPEGAsUTI(NSData *jpegData, NSString *uti, NSData *originalData) {
-    if (!jpegData.length || !uti.length) return nil;
-    if ([uti isEqualToString:@"public.jpeg"] && VCamIsJPEGData(jpegData) && !originalData.length) return jpegData;
+static NSError *VCMQAError(NSInteger code, NSString *message) {
+    return [NSError errorWithDomain:@"VCMQAHarness"
+                               code:code
+                           userInfo:@{
+        NSLocalizedDescriptionKey: message
+    }];
+}
 
-    // 1. Cargar la imagen sintética generada
-    CGImageSourceRef source = CGImageSourceCreateWithData((__bridge CFDataRef)jpegData, NULL);
-    if (!source) return nil;
-
-    CGImageRef image = CGImageSourceCreateImageAtIndex(source, 0, NULL);
-    CFRelease(source);
-    if (!image) return nil;
-
-    // 2. Extraer metadatos y propiedades del archivo original si está disponible
-    NSMutableDictionary *mutableProperties = [NSMutableDictionary dictionary];
-    if (originalData.length > 0) {
-        CGImageSourceRef originalSource = CGImageSourceCreateWithData((__bridge CFDataRef)originalData, NULL);
-        if (originalSource) {
-            CFDictionaryRef originalProps = CGImageSourceCopyPropertiesAtIndex(originalSource, 0, NULL);
-            if (originalProps) {
-                [mutableProperties addEntriesFromDictionary:(__bridge NSDictionary *)originalProps];
-                CFRelease(originalProps);
-            }
-            CFRelease(originalSource);
-        }
-    }
-
-    // 3. Actualizar las dimensiones en las propiedades para que coincidan exactamente con la imagen sintética
-    size_t width = CGImageGetWidth(image);
-    size_t height = CGImageGetHeight(image);
-    
-    mutableProperties[(id)kCGImagePropertyPixelWidth] = @(width);
-    mutableProperties[(id)kCGImagePropertyPixelHeight] = @(height);
-
-    // Si existe un diccionario EXIF dentro de las propiedades, actualizar sus dimensiones también
-    NSMutableDictionary *exifDict = [mutableProperties[(id)kCGImagePropertyExifDictionary] mutableCopy];
-    if (exifDict) {
-        exifDict[(id)kCGImagePropertyExifPixelXDimension] = @(width);
-        exifDict[(id)kCGImagePropertyExifPixelYDimension] = @(height);
-        mutableProperties[(id)kCGImagePropertyExifDictionary] = exifDict;
-    }
-
-    // 4. Codificar el nuevo archivo respetando el contenedor y los metadatos limpios
-    NSMutableData *encoded = [NSMutableData data];
-    CGImageDestinationRef destination = CGImageDestinationCreateWithData((__bridge CFMutableDataRef)encoded,
-                                                                          (__bridge CFStringRef)uti,
-                                                                          1,
-                                                                          NULL);
-    if (!destination) {
-        CGImageRelease(image);
+static NSData *VCMACreateSyntheticJPEG(
+    CGImageRef sourceImage,
+    NSError **error
+) {
+    if (!sourceImage) {
+        if (error) *error = VCMQAError(1, @"Imagen de entrada nula.");
         return nil;
     }
 
-    CGImageDestinationAddImage(destination, image, (__bridge CFDictionaryRef)mutableProperties);
-    BOOL finished = CGImageDestinationFinalize(destination);
-    
-    CFRelease(destination);
-    CGImageRelease(image);
+    size_t width = CGImageGetWidth(sourceImage);
+    size_t height = CGImageGetHeight(sourceImage);
 
-    return finished ? encoded : nil;
+    if (!width || !height || width > 12000 || height > 12000) {
+        if (error) *error = VCMQAError(2, @"Dimensiones no válidas.");
+        return nil;
+    }
+
+    CGColorSpaceRef colorSpace =
+        CGColorSpaceCreateWithName(kCGColorSpaceSRGB);
+
+    if (!colorSpace) {
+        if (error) *error = VCMQAError(3, @"No se pudo crear sRGB.");
+        return nil;
+    }
+
+    CGContextRef context = CGBitmapContextCreate(
+        NULL,
+        width,
+        height,
+        8,
+        0,
+        colorSpace,
+        kCGBitmapByteOrder32Big |
+        kCGImageAlphaPremultipliedLast
+    );
+
+    if (!context) {
+        CGColorSpaceRelease(colorSpace);
+        if (error) *error = VCMQAError(4, @"No se pudo crear el contexto.");
+        return nil;
+    }
+
+    CGContextDrawImage(
+        context,
+        CGRectMake(0, 0, width, height),
+        sourceImage
+    );
+
+    CGImageRef normalizedImage = CGBitmapContextCreateImage(context);
+
+    CGContextRelease(context);
+    CGColorSpaceRelease(colorSpace);
+
+    if (!normalizedImage) {
+        if (error) *error = VCMQAError(5, @"Falló la normalización.");
+        return nil;
+    }
+
+    NSDictionary *exif = @{
+        (id)kCGImagePropertyExifPixelXDimension: @(width),
+        (id)kCGImagePropertyExifPixelYDimension: @(height),
+        (id)kCGImagePropertyExifColorSpace: @1,
+        (id)kCGImagePropertyExifUserComment:
+            @"SYNTHETIC QA FRAME - NOT A CAMERA CAPTURE"
+    };
+
+    NSDictionary *tiff = @{
+        (id)kCGImagePropertyTIFFOrientation: @1,
+        (id)kCGImagePropertyTIFFSoftware:
+            @"VCam-Pro QA Harness"
+    };
+
+    NSDictionary *properties = @{
+        (id)kCGImagePropertyOrientation: @1,
+        (id)kCGImagePropertyExifDictionary: exif,
+        (id)kCGImagePropertyTIFFDictionary: tiff,
+        (id)kCGImageDestinationLossyCompressionQuality: @0.94
+    };
+
+    NSMutableData *output = [NSMutableData data];
+
+    CGImageDestinationRef destination =
+        CGImageDestinationCreateWithData(
+            (__bridge CFMutableDataRef)output,
+            CFSTR("public.jpeg"),
+            1,
+            NULL
+        );
+
+    if (!destination) {
+        CGImageRelease(normalizedImage);
+        if (error) *error = VCMQAError(6, @"No se pudo crear el destino JPEG.");
+        return nil;
+    }
+
+    CGImageDestinationAddImage(
+        destination,
+        normalizedImage,
+        (__bridge CFDictionaryRef)properties
+    );
+
+    BOOL success = CGImageDestinationFinalize(destination);
+
+    CFRelease(destination);
+    CGImageRelease(normalizedImage);
+
+    if (!success || output.length == 0) {
+        if (error) *error = VCMQAError(7, @"No se pudo finalizar el JPEG.");
+        return nil;
+    }
+
+    return [output copy];
 }
 
 static char kVCamPhotoReplacementDataKey;
@@ -913,8 +974,6 @@ static NSData *VCamReplacementDataForPhoto(AVCapturePhoto *photo) {
     NSData *generated = [[MediaManager sharedManager] nextPhotoData];
     if (!generated.length || !VCamIsJPEGData(generated)) return nil;
 
-    // Both the embedded preview and the saved file must represent the same
-    // virtual frame, even when AVFoundation asks for them in separate calls.
     objc_setAssociatedObject(photo,
                              &kVCamPhotoReplacementDataKey,
                              generated,
@@ -938,9 +997,6 @@ static NSData *VCamReplacementDataForPhoto(AVCapturePhoto *photo) {
     CFRelease(source);
     if (!replacement) return original;
 
-    NSLog(@"[VCam Pro] Miniatura de AVCapturePhoto sustituida por el fotograma virtual.");
-    // The AVFoundation method returns a non-owned CGImageRef. Autorelease the
-    // Create-rule result so ARC keeps it alive for the caller's autorelease pool.
     return (CGImageRef)CFAutorelease(replacement);
 }
 
@@ -949,32 +1005,51 @@ static NSData *VCamReplacementDataForPhoto(AVCapturePhoto *photo) {
     if (!VCamIsEnabled() || ![MediaManager sharedManager].isReady) return original;
 
     NSString *uti = VCamDetectedImageUTI(original);
-    if (!uti) return original;
-
-    NSData *virtualJPEG = VCamReplacementDataForPhoto(self);
-    
-    // Pasamos el 'original' para heredar su estructura de metadatos segura
-    NSData *replacement = VCamEncodeJPEGAsUTI(virtualJPEG, uti, original);
-    
-    if (replacement.length > 0) {
-        NSLog(@"[VCam Pro] AVCapturePhoto sustituida en formato %@ con metadatos preservados.", uti);
-        return replacement;
+    if (![uti isEqualToString:@"public.jpeg"]) {
+        return original;
     }
 
-    NSLog(@"[VCam Pro] No se pudo codificar la captura virtual como %@; se conserva la original.", uti);
-    return original;
+    NSData *virtualJPEG = VCamReplacementDataForPhoto(self);
+    if (!virtualJPEG.length || !VCamIsJPEGData(virtualJPEG)) {
+        return original;
+    }
+
+    CGImageSourceRef imageSource =
+        CGImageSourceCreateWithData((__bridge CFDataRef)virtualJPEG, NULL);
+
+    if (!imageSource) return original;
+
+    CGImageRef sourceImage =
+        CGImageSourceCreateImageAtIndex(imageSource, 0, NULL);
+
+    CFRelease(imageSource);
+
+    if (!sourceImage) return original;
+
+    NSError *error = nil;
+    NSData *syntheticJPEG = VCMACreateSyntheticJPEG(sourceImage, &error);
+
+    CGImageRelease(sourceImage);
+
+    if (!syntheticJPEG.length || !VCamIsJPEGData(syntheticJPEG)) {
+        return original;
+    }
+
+    NSLog(@"[VCam Pro] fileDataRepresentation devolvió JPEG sintético normalizado sRGB (%lu bytes).",
+          (unsigned long)syntheticJPEG.length);
+
+    return syntheticJPEG;
 }
 
 %end
 
-// Compatibilidad con aplicaciones antiguas que solicitan una representación JPEG.
+// Compatibilidad con aplicaciones antiguas
 %hook AVCaptureStillImageOutput
 
 + (NSData *)jpegStillImageNSDataRepresentation:(CMSampleBufferRef)jpegSampleBuffer {
     if (VCamIsEnabled() && [MediaManager sharedManager].isReady) {
         NSData *replacement = [[MediaManager sharedManager] nextPhotoData];
         if (replacement.length > 0 && VCamIsJPEGData(replacement)) {
-            NSLog(@"[VCam Pro] Conversión JPEG de AVCaptureStillImageOutput sustituida.");
             return replacement;
         }
     }
@@ -982,8 +1057,6 @@ static NSData *VCamReplacementDataForPhoto(AVCapturePhoto *photo) {
 }
 
 %end
-
-
 // AVCaptureMovieFileOutput is intentionally left untouched in this release.
 // Replacing a completed movie requires an AVAssetExportSession transcode that
 // matches the destination container; copying bytes under a different extension
