@@ -59,6 +59,7 @@ static const void *kVCamDelegateProxyKey = &kVCamDelegateProxyKey;
 static NSUInteger g_vcamVideoCallbackCount = 0;
 static NSUInteger g_vcamVideoReplacementCount = 0;
 static NSMutableSet<NSString *> *g_vcamLoggedOrientationContracts = nil;
+static NSMutableSet<NSString *> *g_vcamLoggedPreviewContracts = nil;
 static NSHashTable<CALayer *> *g_previewOverlayLayers = nil;
 static CIContext *g_previewCIContext = nil;
 static dispatch_source_t g_previewPumpTimer = nil;
@@ -89,6 +90,94 @@ static BOOL VCamIsEnabled(void) {
 static void VCamAppendOrientationDiagnosticLine(NSString *message) {
     if (![message isKindOfClass:[NSString class]] || message.length == 0) return;
     [[VCamSharedState sharedState] appendOrientationDiagnostic:message];
+}
+
+static void VCamLogPreviewLayerOrientation(AVCaptureVideoPreviewLayer *previewLayer,
+                                               NSString *reason) {
+    if (!previewLayer) return;
+
+    AVCaptureConnection *connection = previewLayer.connection;
+    AVCaptureSession *session = previewLayer.session;
+
+    NSInteger orientation = connection ? (NSInteger)connection.videoOrientation : -1;
+    BOOL orientationSupported = connection ? connection.isVideoOrientationSupported : NO;
+    BOOL videoMirrored = connection ? connection.videoMirrored : NO;
+    BOOL mirroringSupported = connection ? connection.isVideoMirroringSupported : NO;
+
+    CGFloat rotationAngle = NAN;
+    SEL rotationSelector = NSSelectorFromString(@"videoRotationAngle");
+    if (connection && [connection respondsToSelector:rotationSelector]) {
+        CGFloat (*sendCGFloat)(id, SEL) = (CGFloat (*)(id, SEL))objc_msgSend;
+        rotationAngle = sendCGFloat(connection, rotationSelector);
+    }
+
+    CATransform3D transform = previewLayer.transform;
+    CGRect bounds = previewLayer.bounds;
+
+    NSMutableArray<NSString *> *inputClasses = [NSMutableArray array];
+    for (AVCaptureInput *input in session.inputs) {
+        [inputClasses addObject:NSStringFromClass([input class]) ?: @"(unknown)"];
+    }
+
+    NSMutableArray<NSString *> *outputClasses = [NSMutableArray array];
+    for (AVCaptureOutput *output in session.outputs) {
+        [outputClasses addObject:NSStringFromClass([output class]) ?: @"(unknown)"];
+    }
+
+    NSString *application = NSBundle.mainBundle.bundleIdentifier ?: @"(sin bundle)";
+    NSString *signature = [NSString stringWithFormat:
+        @"%p|%p|%d|%ld|%d|%d|%d|%.1f|%.3f|%.3f|%.3f|%.3f|%.1f|%.1f",
+        (__bridge void *)previewLayer,
+        (__bridge void *)connection,
+        session.isRunning,
+        (long)orientation,
+        orientationSupported,
+        videoMirrored,
+        mirroringSupported,
+        rotationAngle,
+        transform.m11,
+        transform.m12,
+        transform.m21,
+        transform.m22,
+        bounds.size.width,
+        bounds.size.height];
+
+    BOOL shouldLog = NO;
+    @synchronized ([AVCaptureVideoPreviewLayer class]) {
+        if (!g_vcamLoggedPreviewContracts) {
+            g_vcamLoggedPreviewContracts = [NSMutableSet set];
+        }
+        if (g_vcamLoggedPreviewContracts.count < 32 &&
+            ![g_vcamLoggedPreviewContracts containsObject:signature]) {
+            [g_vcamLoggedPreviewContracts addObject:signature];
+            shouldLog = YES;
+        }
+    }
+    if (!shouldLog) return;
+
+    NSString *diagnostic = [NSString stringWithFormat:
+        @"[VCam Pro/OrientationDiag] PREVIEW_LAYER app=%@ reason=%@ layer=%p connection=%p sessionRunning=%d bounds=%.1fx%.1f gravity=%@ orientation=%ld orientationSupported=%d mirrored=%d mirroringSupported=%d rotationAngle=%.1f layerTransform=[%.3f %.3f %.3f %.3f] inputs=%@ outputs=%@",
+        application,
+        reason ?: @"unknown",
+        (__bridge void *)previewLayer,
+        (__bridge void *)connection,
+        session.isRunning,
+        bounds.size.width,
+        bounds.size.height,
+        previewLayer.videoGravity ?: @"(nil)",
+        (long)orientation,
+        orientationSupported,
+        videoMirrored,
+        mirroringSupported,
+        rotationAngle,
+        transform.m11,
+        transform.m12,
+        transform.m21,
+        transform.m22,
+        inputClasses,
+        outputClasses];
+
+    VCamAppendOrientationDiagnosticLine(diagnostic);
 }
 
 static void VCamLogConnectionOrientation(CMSampleBufferRef sampleBuffer,
@@ -679,6 +768,7 @@ static void VCamStartPreviewPump(void) {
 static void VCamAttachPreviewOverlay(AVCaptureVideoPreviewLayer *previewLayer) {
     if (!previewLayer) return;
     dispatch_async(dispatch_get_main_queue(), ^{
+        VCamLogPreviewLayerOrientation(previewLayer, @"attach");
         CALayer *existing = objc_getAssociatedObject(previewLayer, kVCamPreviewOverlayKey);
         if (existing) return;
 
@@ -877,6 +967,11 @@ static void VCamAttachPreviewOverlay(AVCaptureVideoPreviewLayer *previewLayer) {
 - (void)setSession:(AVCaptureSession *)session {
     %orig(session);
     VCamAttachPreviewOverlay(self);
+}
+
+- (void)layoutSublayers {
+    %orig;
+    VCamLogPreviewLayerOrientation(self, @"layoutSublayers");
 }
 
 - (void)setBounds:(CGRect)bounds {
