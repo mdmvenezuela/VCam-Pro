@@ -289,9 +289,14 @@ static BOOL VCMIsRenderedOrientationAttachment(const void *key) {
     if (!key || CFGetTypeID(key) != CFStringGetTypeID()) return NO;
     NSString *name = [(__bridge NSString *)key lowercaseString];
 
-    // The replacement pixels are already rendered upright into the camera's
-    // target dimensions. Forwarding source orientation/transform metadata makes
-    // some clients rotate those pixels a second time.
+    // UprightExifOrientation is the camera pipeline's source-orientation
+    // contract. BWNodeOutput provides it on the original CMSampleBuffer and
+    // downstream clients (including clients outside our injected processes)
+    // may rely on it to display the replacement pixels upright. Preserve that
+    // exact system-supplied value while dropping stale pixel transforms that
+    // would apply an additional rotation to the already-rendered buffer.
+    if ([name isEqualToString:@"uprightexiforientation"]) return NO;
+
     return [name containsString:@"orientation"] ||
            [name containsString:@"rotation"] ||
            [name containsString:@"transform"];
