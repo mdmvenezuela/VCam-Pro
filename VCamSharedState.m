@@ -100,6 +100,9 @@ static void VCamSendOrientationDiagnosticToSpringBoard(NSString *message) {
     NSUInteger _engineHooks;
     NSUInteger _engineFrames;
     NSTimeInterval _engineLastSeen;
+    NSInteger _captureOutputOrientation;
+    BOOL _captureOutputOrientationSupported;
+    BOOL _captureOutputMirrored;
 }
 
 - (NSString *)privateDirectory;
@@ -145,6 +148,9 @@ static void VCamSendOrientationDiagnosticToSpringBoard(NSString *message) {
         _engineHooks = 0;
         _engineFrames = 0;
         _engineLastSeen = 0;
+        _captureOutputOrientation = -1;
+        _captureOutputOrientationSupported = NO;
+        _captureOutputMirrored = NO;
 
         NSDictionary *saved = [NSDictionary dictionaryWithContentsOfFile:[self stateFilePath]];
         if ([saved isKindOfClass:[NSDictionary class]]) {
@@ -306,6 +312,9 @@ static void VCamSendOrientationDiagnosticToSpringBoard(NSString *message) {
         @"motionEnabled": @(_motionEnabled),
         @"buttonX": @(_buttonX),
         @"buttonY": @(_buttonY),
+        @"captureOutputOrientation": @(_captureOutputOrientation),
+        @"captureOutputOrientationSupported": @(_captureOutputOrientationSupported),
+        @"captureOutputMirrored": @(_captureOutputMirrored),
         @"engineStatus": _engineStatus ?: @"not_reported",
         @"engineDetail": _engineDetail ?: @"",
         @"engineHooks": @(_engineHooks),
@@ -321,6 +330,9 @@ static void VCamSendOrientationDiagnosticToSpringBoard(NSString *message) {
     }
 
     NSMutableDictionary *dictionary = [[self snapshotLocked] mutableCopy];
+    [dictionary removeObjectForKey:@"captureOutputOrientation"];
+    [dictionary removeObjectForKey:@"captureOutputOrientationSupported"];
+    [dictionary removeObjectForKey:@"captureOutputMirrored"];
     dictionary[@"mediaPath"] = _mediaPath ?: @"";
 
     NSError *error = nil;
@@ -765,6 +777,68 @@ static void VCamSendOrientationDiagnosticToSpringBoard(NSString *message) {
             if (!VCamSendAll(clientFD, fileBuffer, (size_t)amount)) break;
         }
         close(fileFD);
+        return;
+    }
+
+    if (isPOST && [requestPath isEqualToString:@"/capture-orientation"]) {
+        const unsigned long long maximumOrientationSize = 4096;
+        if (contentLength == 0 || contentLength > maximumOrientationSize ||
+            initialBodyLength > contentLength) return;
+
+        NSMutableData *body = [NSMutableData dataWithBytes:initialBody
+                                                    length:initialBodyLength];
+        while (body.length < contentLength) {
+            size_t remaining = (size_t)(contentLength - body.length);
+            ssize_t amount = recv(clientFD, receiveBuffer,
+                                  MIN(sizeof(receiveBuffer), remaining), 0);
+            if (amount < 0) {
+                if (errno == EINTR) continue;
+                return;
+            }
+            if (amount == 0) return;
+            [body appendBytes:receiveBuffer length:(NSUInteger)amount];
+        }
+
+        NSError *jsonError = nil;
+        id object = [NSJSONSerialization JSONObjectWithData:body options:0 error:&jsonError];
+        if (![object isKindOfClass:[NSDictionary class]]) {
+            NSData *responseBody = [@"Invalid capture orientation JSON" dataUsingEncoding:NSUTF8StringEncoding];
+            NSString *responseHeader = [NSString stringWithFormat:
+                @"HTTP/1.1 400 Bad Request\\r\\nContent-Length: %lu\\r\\nConnection: close\\r\\n\\r\\n",
+                (unsigned long)responseBody.length];
+            VCamSendAll(clientFD, responseHeader.UTF8String, responseHeader.length);
+            VCamSendAll(clientFD, responseBody.bytes, responseBody.length);
+            return;
+        }
+
+        NSDictionary *report = (NSDictionary *)object;
+        NSInteger orientation = [report[@"orientation"] respondsToSelector:@selector(integerValue)]
+            ? [report[@"orientation"] integerValue] : -1;
+        BOOL supported = [report[@"supported"] boolValue];
+        BOOL mirrored = [report[@"mirrored"] boolValue];
+        if (orientation < -1 || orientation > 4) {
+            NSData *responseBody = [@"Invalid video orientation" dataUsingEncoding:NSUTF8StringEncoding];
+            NSString *responseHeader = [NSString stringWithFormat:
+                @"HTTP/1.1 400 Bad Request\\r\\nContent-Length: %lu\\r\\nConnection: close\\r\\n\\r\\n",
+                (unsigned long)responseBody.length];
+            VCamSendAll(clientFD, responseHeader.UTF8String, responseHeader.length);
+            VCamSendAll(clientFD, responseBody.bytes, responseBody.length);
+            return;
+        }
+
+        if (!supported || orientation < 1 || orientation > 4) orientation = -1;
+        [_stateLock lock];
+        _captureOutputOrientation = orientation;
+        _captureOutputOrientationSupported = (orientation >= 1);
+        _captureOutputMirrored = mirrored;
+        [_stateLock unlock];
+
+        NSData *responseBody = [@"{\\\"ok\\\":true}" dataUsingEncoding:NSUTF8StringEncoding];
+        NSString *responseHeader = [NSString stringWithFormat:
+            @"HTTP/1.1 200 OK\\r\\nContent-Type: application/json\\r\\nContent-Length: %lu\\r\\nConnection: close\\r\\n\\r\\n",
+            (unsigned long)responseBody.length];
+        VCamSendAll(clientFD, responseHeader.UTF8String, responseHeader.length);
+        VCamSendAll(clientFD, responseBody.bytes, responseBody.length);
         return;
     }
 

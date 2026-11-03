@@ -79,6 +79,8 @@ static BOOL VCamIsEnabled(void);
 static void VCamClampButton(void);
 static void VCamShowAdjustmentPanel(void);
 static void VCamCloseAdjustmentPanel(void);
+static void VCamReportCaptureOutputOrientation(AVCaptureConnection *connection, NSString *reason);
+static void VCamReportSessionOutputOrientation(AVCaptureSession *session, NSString *reason);
 
 static BOOL VCamIsEnabled(void) {
     @synchronized ([MediaManager class]) {
@@ -422,6 +424,97 @@ static BOOL VCamSocketSendAll(int socketFD, const void *bytes, size_t length) {
         sent += (size_t)amount;
     }
     return YES;
+}
+
+static NSString *g_vcamLastCaptureOutputSignature = nil;
+
+static void VCamReportCaptureOutputOrientationValue(NSInteger orientation,
+                                                    BOOL supported,
+                                                    BOOL mirrored,
+                                                    NSString *reason) {
+    NSInteger normalizedOrientation =
+        (supported && orientation >= 1 && orientation <= 4) ? orientation : -1;
+    BOOL normalizedSupported = normalizedOrientation >= 1;
+    NSString *application = NSBundle.mainBundle.bundleIdentifier ?: @"(sin bundle)";
+    NSString *signature = [NSString stringWithFormat:@"%@|%ld|%d|%d",
+        application, (long)normalizedOrientation, normalizedSupported, mirrored];
+
+    BOOL changed = NO;
+    @synchronized ([AVCaptureSession class]) {
+        if (![g_vcamLastCaptureOutputSignature isEqualToString:signature]) {
+            g_vcamLastCaptureOutputSignature = [signature copy];
+            changed = YES;
+        }
+    }
+    if (!changed) return;
+
+    NSString *diagnostic = [NSString stringWithFormat:
+        @"[VCam Pro/OrientationDiag] CAPTURE_ORIENTATION_REPORT app=%@ reason=%@ orientation=%ld supported=%d mirrored=%d",
+        application, reason ?: @"unknown", (long)normalizedOrientation,
+        normalizedSupported, mirrored];
+    VCamAppendOrientationDiagnosticLine(diagnostic);
+
+    NSDictionary *payload = @{
+        @"orientation": @(normalizedOrientation),
+        @"supported": @(normalizedSupported),
+        @"mirrored": @(mirrored),
+        @"application": application
+    };
+    NSError *jsonError = nil;
+    NSData *body = [NSJSONSerialization dataWithJSONObject:payload options:0 error:&jsonError];
+    if (!body || body.length == 0 || body.length > 4096) return;
+
+    int socketFD = VCamConnectToServer();
+    if (socketFD < 0) {
+        NSLog(@"[VCam Pro/OrientationDiag] No se pudo comunicar la orientación de salida a SpringBoard.");
+        return;
+    }
+
+    struct timeval timeout = {1, 0};
+    setsockopt(socketFD, SOL_SOCKET, SO_RCVTIMEO, &timeout, sizeof(timeout));
+    setsockopt(socketFD, SOL_SOCKET, SO_SNDTIMEO, &timeout, sizeof(timeout));
+    NSString *header = [NSString stringWithFormat:
+        @"POST /capture-orientation HTTP/1.1\\r\\nHost: 127.0.0.1\\r\\nContent-Type: application/json\\r\\nContent-Length: %lu\\r\\nConnection: close\\r\\n\\r\\n",
+        (unsigned long)body.length];
+    BOOL sent = VCamSocketSendAll(socketFD, header.UTF8String, header.length) &&
+                VCamSocketSendAll(socketFD, body.bytes, body.length);
+    if (sent) {
+        char response[256];
+        (void)recv(socketFD, response, sizeof(response), 0);
+    }
+    close(socketFD);
+}
+
+static void VCamReportCaptureOutputOrientation(AVCaptureConnection *connection,
+                                               NSString *reason) {
+    if (!connection) {
+        VCamReportCaptureOutputOrientationValue(-1, NO, NO, reason);
+        return;
+    }
+    VCamReportCaptureOutputOrientationValue((NSInteger)connection.videoOrientation,
+                                            connection.isVideoOrientationSupported,
+                                            connection.videoMirrored,
+                                            reason);
+}
+
+static void VCamReportSessionOutputOrientation(AVCaptureSession *session,
+                                               NSString *reason) {
+    if (!session) {
+        VCamReportCaptureOutputOrientationValue(-1, NO, NO, reason);
+        return;
+    }
+
+    for (AVCaptureOutput *output in session.outputs) {
+        if (![output isKindOfClass:[AVCaptureVideoDataOutput class]]) continue;
+        for (AVCaptureConnection *connection in output.connections) {
+            NSString *mediaType = connection.inputPorts.firstObject.mediaType;
+            if (mediaType.length > 0 && ![mediaType isEqualToString:AVMediaTypeVideo]) continue;
+            VCamReportCaptureOutputOrientation(connection, reason);
+            return;
+        }
+    }
+
+    VCamReportCaptureOutputOrientationValue(-1, NO, NO, reason);
 }
 
 static NSData *VCamHTTPGet(NSString *path) {
@@ -935,6 +1028,7 @@ static void VCamAttachPreviewOverlay(AVCaptureVideoPreviewLayer *previewLayer) {
 
     id<AVCaptureVideoDataOutputSampleBufferDelegate> delegate = self.originalDelegate;
     VCamLogConnectionOrientation(sampleBuffer, output, connection);
+    VCamReportCaptureOutputOrientation(connection, @"videoDataOutputDelegate");
     if (!delegate) {
         NSLog(@"[VCam Pro] El delegado original de AVCaptureVideoDataOutput ya no existe.");
         return;
@@ -1039,6 +1133,22 @@ static void VCamAttachPreviewOverlay(AVCaptureVideoPreviewLayer *previewLayer) {
 }
 
 @end
+
+%hook AVCaptureSession
+
+- (void)startRunning {
+    // Publish the configured VideoDataOutput orientation before camera frames
+    // enter mediaserverd's replacement hook.
+    VCamReportSessionOutputOrientation(self, @"sessionStartRunning");
+    %orig;
+}
+
+- (void)stopRunning {
+    %orig;
+    VCamReportCaptureOutputOrientationValue(-1, NO, NO, @"sessionStopRunning");
+}
+
+%end
 
 %hook AVCaptureVideoDataOutput
 
@@ -2151,7 +2261,8 @@ static void VCamShowOrientationDiagnostics(void) {
         if ([line containsString:@"APP_FRAME"] ||
             [line containsString:@"APP_ROUTE"] ||
             [line containsString:@"PREVIEW_LAYER"] ||
-            [line containsString:@"SESSION_OUTPUT"]) {
+            [line containsString:@"SESSION_OUTPUT"] ||
+            [line containsString:@"CAPTURE_ORIENTATION"]) {
             [appDiagnostics addObject:line];
         } else if ([line containsString:@"[VCam Pro/OrientationDiag] render #"]) {
             [renderDiagnostics addObject:line];

@@ -6,6 +6,7 @@ on:
       - main
       - fix/remove-invalid-photoutput-hook
       - diag/read-bwnode-metadata-values
+      - fix/whatsapp-video-notes-orientation
     tags:
       - 'v*'
 

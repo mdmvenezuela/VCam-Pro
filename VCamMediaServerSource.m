@@ -385,6 +385,8 @@ static BOOL VCMDownloadMedia(NSString *destinationPath, NSInteger revision) {
     BOOL _hasReportedEnableState;
     BOOL _reportedEnabled;
     CGAffineTransform _preferredTransform;
+    NSInteger _captureOutputOrientation;
+    BOOL _captureOutputOrientationSupported;
     NSInteger _loadedRevision;
     NSInteger _loadingRevision;
     NSInteger _failedRevision;
@@ -462,6 +464,8 @@ static void VCMSharedStateDidChange(CFNotificationCenterRef center,
         _loadedRevision = -1;
         _loadingRevision = -1;
         _failedRevision = -1;
+        _captureOutputOrientation = -1;
+        _captureOutputOrientationSupported = NO;
         _zoom = 1.0;
         _ciContext = [CIContext contextWithOptions:@{kCIContextUseSoftwareRenderer: @NO,
                                                       kCIContextCacheIntermediates: @NO}];
@@ -558,6 +562,14 @@ static void VCMSharedStateDidChange(CFNotificationCenterRef center,
         ? state[@"mediaType"] : @"";
     NSString *extension = [state[@"mediaExtension"] isKindOfClass:[NSString class]]
         ? state[@"mediaExtension"] : @"mp4";
+    NSInteger captureOutputOrientation = [state[@"captureOutputOrientation"] integerValue];
+    BOOL captureOutputOrientationSupported =
+        [state[@"captureOutputOrientationSupported"] boolValue];
+    if (!captureOutputOrientationSupported ||
+        captureOutputOrientation < 1 || captureOutputOrientation > 4) {
+        captureOutputOrientation = -1;
+        captureOutputOrientationSupported = NO;
+    }
 
     [_lock lock];
     BOOL enableStateChanged = !_hasReportedEnableState || _reportedEnabled != enabled;
@@ -575,6 +587,8 @@ static void VCMSharedStateDidChange(CFNotificationCenterRef center,
     _rotationDegrees = ((rotation + 45) / 90 * 90) % 360;
     _mirrorEnabled = [state[@"mirrorEnabled"] boolValue];
     _motionEnabled = [state[@"motionEnabled"] boolValue];
+    _captureOutputOrientation = captureOutputOrientation;
+    _captureOutputOrientationSupported = captureOutputOrientationSupported;
 
     // Load the new revision in the background without discarding the last
     // valid frame. The old image/video remains on screen until decoding of the
@@ -963,6 +977,8 @@ static void VCMSharedStateDidChange(CFNotificationCenterRef center,
     NSInteger rotationDegrees = _rotationDegrees;
     BOOL mirrorEnabled = _mirrorEnabled;
     BOOL motionEnabled = _motionEnabled;
+    NSInteger captureOutputOrientation = _captureOutputOrientation;
+    BOOL captureOutputOrientationSupported = _captureOutputOrientationSupported;
     [_lock unlock];
 
     if (frameToRender.pixelBuffer) {
@@ -982,11 +998,37 @@ static void VCMSharedStateDidChange(CFNotificationCenterRef center,
     }
     if (!sourceImage) return NULL;
 
+    // WhatsApp's portrait VideoDataOutput receives physically rotated buffers.
+    // BWNodeOutput runs before that connection transform, so pre-rotate the
+    // selected source only when the reported Portrait contract and landscape
+    // source-buffer geometry match the captured iPhone X route.
+    CGImagePropertyOrientation outputCompensation = kCGImagePropertyOrientationUp;
+    NSString *outputCompensationName = @"none";
+    BOOL sourceBufferIsLandscape =
+        CVPixelBufferGetWidth(templateBuffer) > CVPixelBufferGetHeight(templateBuffer);
+    if (captureOutputOrientationSupported &&
+        captureOutputOrientation == 1 &&
+        sourceBufferIsLandscape) {
+        outputCompensation = kCGImagePropertyOrientationRight;
+        outputCompensationName = @"right-90";
+    }
+
+    if (outputCompensation != kCGImagePropertyOrientationUp) {
+        sourceImage = [sourceImage imageByApplyingOrientation:outputCompensation];
+        CGRect compensationExtent = sourceImage.extent;
+        if (!CGRectIsEmpty(compensationExtent) &&
+            (compensationExtent.origin.x != 0.0 || compensationExtent.origin.y != 0.0)) {
+            sourceImage = [sourceImage imageByApplyingTransform:
+                CGAffineTransformMakeTranslation(-compensationExtent.origin.x,
+                                                 -compensationExtent.origin.y)];
+        }
+    }
+
     uint32_t renderDiagnostic = atomic_fetch_add_explicit(
         &g_vcmRenderDiagnosticCount, 1, memory_order_relaxed);
     if (renderDiagnostic < 24) {
         NSString *diagnostic = [NSString stringWithFormat:
-            @"[VCam Pro/OrientationDiag] render #%u media=%@ source=%.1fx%.1f target=%zux%zu rotation=%ld mirror=%d preferred=[%.3f %.3f %.3f %.3f %.3f %.3f]",
+            @"[VCam Pro/OrientationDiag] render #%u media=%@ source=%.1fx%.1f target=%zux%zu rotation=%ld mirror=%d captureOrientation=%ld captureOrientationSupported=%d sourceLandscape=%d preRotate=%@ preferred=[%.3f %.3f %.3f %.3f %.3f %.3f]",
             renderDiagnostic + 1,
             videoMode ? @"video" : @"image",
             sourceImage.extent.size.width,
@@ -995,6 +1037,10 @@ static void VCMSharedStateDidChange(CFNotificationCenterRef center,
             CVPixelBufferGetHeight(templateBuffer),
             (long)rotationDegrees,
             mirrorEnabled,
+            (long)captureOutputOrientation,
+            captureOutputOrientationSupported,
+            sourceBufferIsLandscape,
+            outputCompensationName,
             preferredTransform.a, preferredTransform.b,
             preferredTransform.c, preferredTransform.d,
             preferredTransform.tx, preferredTransform.ty];
