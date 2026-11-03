@@ -58,7 +58,7 @@ static char g_darwinObserverToken;
 static const void *kVCamDelegateProxyKey = &kVCamDelegateProxyKey;
 static NSUInteger g_vcamVideoCallbackCount = 0;
 static NSUInteger g_vcamVideoReplacementCount = 0;
-static NSUInteger g_vcamOrientationContractDiagnosticCount = 0;
+static NSMutableSet<NSString *> *g_vcamLoggedOrientationContracts = nil;
 static NSHashTable<CALayer *> *g_previewOverlayLayers = nil;
 static CIContext *g_previewCIContext = nil;
 static dispatch_source_t g_previewPumpTimer = nil;
@@ -119,15 +119,6 @@ static void VCamAppendOrientationDiagnosticLine(NSString *message) {
 static void VCamLogConnectionOrientation(CMSampleBufferRef sampleBuffer,
                                          AVCaptureOutput *output,
                                          AVCaptureConnection *connection) {
-    NSUInteger diagnosticNumber = 0;
-    @synchronized ([AVCaptureVideoDataOutput class]) {
-        if (g_vcamOrientationContractDiagnosticCount < 24) {
-            g_vcamOrientationContractDiagnosticCount += 1;
-            diagnosticNumber = g_vcamOrientationContractDiagnosticCount;
-        }
-    }
-    if (diagnosticNumber == 0) return;
-
     CVImageBufferRef imageBuffer = sampleBuffer ? CMSampleBufferGetImageBuffer(sampleBuffer) : NULL;
     size_t width = imageBuffer ? CVPixelBufferGetWidth(imageBuffer) : 0;
     size_t height = imageBuffer ? CVPixelBufferGetHeight(imageBuffer) : 0;
@@ -153,9 +144,36 @@ static void VCamLogConnectionOrientation(CMSampleBufferRef sampleBuffer,
 
     NSString *application = NSBundle.mainBundle.bundleIdentifier ?: @"(sin bundle)";
     NSString *outputClass = output ? NSStringFromClass([output class]) : @"(nil)";
+    NSString *signature = [NSString stringWithFormat:
+        @"%@|%@|%zux%zu|%dx%d|%u|%ld|%d|%d|%d|%.1f",
+        application,
+        outputClass,
+        width,
+        height,
+        formatDimensions.width,
+        formatDimensions.height,
+        (unsigned int)pixelFormat,
+        (long)orientation,
+        orientationSupported,
+        videoMirrored,
+        mirroringSupported,
+        rotationAngle];
+
+    BOOL shouldLog = NO;
+    @synchronized ([AVCaptureVideoDataOutput class]) {
+        if (!g_vcamLoggedOrientationContracts) {
+            g_vcamLoggedOrientationContracts = [NSMutableSet set];
+        }
+        if (g_vcamLoggedOrientationContracts.count < 24 &&
+            ![g_vcamLoggedOrientationContracts containsObject:signature]) {
+            [g_vcamLoggedOrientationContracts addObject:signature];
+            shouldLog = YES;
+        }
+    }
+    if (!shouldLog) return;
+
     NSString *diagnostic = [NSString stringWithFormat:
-        @"[VCam Pro/OrientationDiag] APP_FRAME #%lu app=%@ output=%@ sample=%zux%zu format=%dx%d pixel=%u connectionOrientation=%ld orientationSupported=%d videoMirrored=%d mirroringSupported=%d rotationAngle=%.1f",
-        (unsigned long)diagnosticNumber,
+        @"[VCam Pro/OrientationDiag] APP_FRAME app=%@ output=%@ sample=%zux%zu format=%dx%d pixel=%u connectionOrientation=%ld orientationSupported=%d videoMirrored=%d mirroringSupported=%d rotationAngle=%.1f",
         application,
         outputClass,
         width,
