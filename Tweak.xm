@@ -1065,30 +1065,10 @@ static NSData *VCamReplacementDataForPhoto(AVCapturePhoto *photo) {
 
 %end
 
-%hook AVCapturePhotoOutput
-
-- (void)captureOutput:(AVCaptureOutput *)output didOutputSampleBuffer:(CMSampleBufferRef)sampleBuffer fromConnection:(AVCaptureConnection *)connection {
-    if (!VCamIsEnabled() || ![MediaManager sharedManager].isReady) {
-        %orig;
-        return;
-    }
-
-    CVImageBufferRef originalBuffer = CMSampleBufferGetImageBuffer(sampleBuffer);
-    CGSize bufferSize = originalBuffer ? CGSizeMake(CVPixelBufferGetWidth(originalBuffer), CVPixelBufferGetHeight(originalBuffer)) : CGSizeMake(1280, 720);
-    OSType pixelFormat = originalBuffer ? CVPixelBufferGetPixelFormatType(originalBuffer) : kCVPixelFormatType_32BGRA;
-
-    CMSampleBufferRef virtualBuffer = [[MediaManager sharedManager] nextVideoFrameForSize:bufferSize pixelFormat:pixelFormat];
-    
-    if (virtualBuffer) {
-        %orig(output, virtualBuffer, connection);
-        CFRelease(virtualBuffer);
-        return;
-    }
-
-    %orig;
-}
-
-%end
+// AVCapturePhotoOutput does not implement the video sample-buffer delegate callback.
+// That callback is handled by VCamSampleBufferDelegateProxy above, where the
+// output is actually AVCaptureVideoDataOutput. Still-photo delegate handling
+// remains separate and is intentionally not changed in this correction.
 
 // Compatibilidad con aplicaciones antiguas
 %hook AVCaptureStillImageOutput
