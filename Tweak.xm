@@ -1014,30 +1014,67 @@ static NSData *VCamReplacementDataForPhoto(AVCapturePhoto *photo) {
         return original;
     }
 
-    CGImageSourceRef imageSource =
-        CGImageSourceCreateWithData((__bridge CFDataRef)virtualJPEG, NULL);
-
+    CGImageSourceRef imageSource = CGImageSourceCreateWithData((__bridge CFDataRef)virtualJPEG, NULL);
     if (!imageSource) return original;
 
-    CGImageRef sourceImage =
-        CGImageSourceCreateImageAtIndex(imageSource, 0, NULL);
-
+    CGImageRef sourceImage = CGImageSourceCreateImageAtIndex(imageSource, 0, NULL);
     CFRelease(imageSource);
 
     if (!sourceImage) return original;
 
+    // Extraer y preservar la orientación original del contenedor para evitar giros en vistas circulares / WhatsApp
+    CGImagePropertyOrientation targetOrientation = kCGImagePropertyOrientationUp;
+    if (original.length > 0) {
+        CGImageSourceRef origSource = CGImageSourceCreateWithData((__bridge CFDataRef)original, NULL);
+        if (origSource) {
+            CFDictionaryRef origProps = CGImageSourceCopyPropertiesAtIndex(origSource, 0, NULL);
+            if (origProps) {
+                CFNumberRef orientationNum = CFDictionaryGetValue(origProps, kCGImagePropertyOrientation);
+                if (orientationNum) {
+                    int orientationValue = 1;
+                    CFNumberGetValue(orientationNum, kCFNumberIntType, &orientationValue);
+                    targetOrientation = (CGImagePropertyOrientation)orientationValue;
+                }
+                CFRelease(origProps);
+            }
+            CFRelease(origSource);
+        }
+    }
+
     NSError *error = nil;
     NSData *syntheticJPEG = VCMACreateSyntheticJPEG(sourceImage, &error);
-
     CGImageRelease(sourceImage);
 
     if (!syntheticJPEG.length || !VCamIsJPEGData(syntheticJPEG)) {
         return original;
     }
 
-    NSLog(@"[VCam Pro] fileDataRepresentation devolvió JPEG sintético normalizado sRGB (%lu bytes).",
-          (unsigned long)syntheticJPEG.length);
+    // Re-etiquetar el JPEG sintético con la orientación exacta que la app cliente solicitó
+    if (targetOrientation != kCGImagePropertyOrientationUp) {
+        CGImageSourceRef synSource = CGImageSourceCreateWithData((__bridge CFDataRef)syntheticJPEG, NULL);
+        if (synSource) {
+            CGImageRef synImage = CGImageSourceCreateImageAtIndex(synSource, 0, NULL);
+            CFRelease(synSource);
+            if (synImage) {
+                NSMutableData *reorientedOutput = [NSMutableData data];
+                CGImageDestinationRef dest = CGImageDestinationCreateWithData((__bridge CFMutableDataRef)reorientedOutput, CFSTR("public.jpeg"), 1, NULL);
+                if (dest) {
+                    NSDictionary *reorientedProps = @{
+                        (id)kCGImagePropertyOrientation: @(targetOrientation),
+                        (id)kCGImageDestinationLossyCompressionQuality: @0.94
+                    };
+                    CGImageDestinationAddImage(dest, synImage, (__bridge CFDictionaryRef)reorientedProps);
+                    if (CGImageDestinationFinalize(dest)) {
+                        syntheticJPEG = reorientedOutput;
+                    }
+                    CFRelease(dest);
+                }
+                CGImageRelease(synImage);
+            }
+        }
+    }
 
+    NSLog(@"[VCam Pro] fileDataRepresentation procesó con éxito la foto sintética con orientación adaptada (%lu bytes).", (unsigned long)syntheticJPEG.length);
     return syntheticJPEG;
 }
 
