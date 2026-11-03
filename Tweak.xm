@@ -1793,6 +1793,13 @@ static NSString *VCamBooleanPropertyDescription(id object,
     return sendBoolean(object, selector) ? @"yes" : @"no";
 }
 
+static id VCamObjectProperty(id object, NSString *selectorName) {
+    SEL selector = NSSelectorFromString(selectorName);
+    if (!object || ![object respondsToSelector:selector]) return nil;
+    id (*sendObject)(id, SEL) = (id (*)(id, SEL))objc_msgSend;
+    return sendObject(object, selector);
+}
+
 static void VCamLogPhotoOutputCapabilities(AVCapturePhotoOutput *output) {
     if (!output) return;
 
@@ -1826,7 +1833,12 @@ static void VCamLogPhotoCaptureSettings(AVCapturePhotoOutput *output,
         return;
     }
 
-    CMVideoDimensions dimensions = settings.maxPhotoDimensions;
+    CMVideoDimensions dimensions = {0, 0};
+    if (@available(iOS 16.0, *)) {
+        dimensions = settings.maxPhotoDimensions;
+    }
+    NSDictionary *rawFileFormat =
+        VCamObjectProperty(settings, @"rawFileFormat");
     NSArray *matteTypes = settings.enabledSemanticSegmentationMatteTypes ?: @[];
 
     NSLog(@"[VCam PhotoDiag] SETTINGS stage=%@ output=%p settings=%p uniqueID=%lld flashMode=%ld qualityPrioritization=%ld rawPixelFormat=%u maxPhotoDimensions=%dx%d depthEnabled=%@ embedsDepth=%@ depthFiltered=%@ portraitMatteEnabled=%@ embedsPortraitMatte=%@ embedsSemanticMattes=%@ semanticMatteTypes=%@ calibrationDataEnabled=%@ autoRedEye=%@ autoDistortionCorrection=%@ livePhotoRequested=%d",
@@ -1852,7 +1864,7 @@ static void VCamLogPhotoCaptureSettings(AVCapturePhotoOutput *output,
 
     NSLog(@"[VCam PhotoDiag] SETTINGS_FORMAT format={%@} rawFileFormat={%@} previewFormat={%@} embeddedThumbnailFormat={%@} metadata={%@} livePhotoMetadata={%@}",
         VCamDictionarySchema(settings.format, YES),
-        VCamDictionarySchema(settings.rawFileFormat, YES),
+        VCamDictionarySchema(rawFileFormat, YES),
         VCamDictionarySchema(settings.previewPhotoFormat, YES),
         VCamDictionarySchema(settings.embeddedThumbnailPhotoFormat, YES),
         VCamDictionarySchema(settings.metadata, NO),
