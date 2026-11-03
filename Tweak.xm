@@ -553,7 +553,7 @@ static void VCamReportCaptureOutputOrientation(AVCaptureConnection *connection,
 static void VCamReportSessionOutputOrientation(AVCaptureSession *session,
                                                NSString *reason) {
     if (!session) {
-        VCamReportCaptureOutputOrientationValue(-1, NO, NO, reason);
+        VCamReportCaptureOutputOrientationValue(-1, NO, NO, @"none", reason);
         return;
     }
 
