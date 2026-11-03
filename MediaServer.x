@@ -108,6 +108,115 @@ static NSString *VCMDescribeDictionaryKeys(CFDictionaryRef dictionary) {
     return [NSString stringWithFormat:@"[%@]", [names componentsJoinedByString:@","]];
 }
 
+
+static NSString *VCMDescribeMetadataValue(CFTypeRef value, NSUInteger depth) {
+    if (!value) return @"<null>";
+    CFTypeID type = CFGetTypeID(value);
+
+    if (type == CFStringGetTypeID()) {
+        NSString *string = (__bridge NSString *)value;
+        string = [string stringByReplacingOccurrencesOfString:@"\\n" withString:@" "];
+        if (string.length > 140) string = [[string substringToIndex:140] stringByAppendingString:@"…"];
+        return [NSString stringWithFormat:@"\"%@\"", string];
+    }
+    if (type == CFBooleanGetTypeID() || type == CFNumberGetTypeID()) {
+        return [NSString stringWithFormat:@"%@", (__bridge id)value];
+    }
+    if (type == CFDataGetTypeID()) {
+        CFIndex length = CFDataGetLength((CFDataRef)value);
+        const UInt8 *bytes = CFDataGetBytePtr((CFDataRef)value);
+        NSMutableString *hex = [NSMutableString string];
+        CFIndex limit = MIN(length, 20);
+        for (CFIndex index = 0; index < limit; index++) {
+            [hex appendFormat:@"%02x", bytes[index]];
+        }
+        return [NSString stringWithFormat:@"<data:%ld bytes:%@%@>",
+                (long)length, hex, length > limit ? @"…" : @""];
+    }
+    if (type == CFArrayGetTypeID()) {
+        CFArrayRef array = (CFArrayRef)value;
+        CFIndex count = CFArrayGetCount(array);
+        if (depth >= 3) return [NSString stringWithFormat:@"<array:%ld>", (long)count];
+        NSMutableArray<NSString *> *items = [NSMutableArray array];
+        CFIndex limit = MIN(count, 8);
+        for (CFIndex index = 0; index < limit; index++) {
+            [items addObject:VCMDescribeMetadataValue(
+                (CFTypeRef)CFArrayGetValueAtIndex(array, index), depth + 1)];
+        }
+        if (count > limit) [items addObject:@"…"];
+        return [NSString stringWithFormat:@"[%@]", [items componentsJoinedByString:@","]];
+    }
+    if (type == CFDictionaryGetTypeID()) {
+        CFDictionaryRef dictionary = (CFDictionaryRef)value;
+        CFIndex count = CFDictionaryGetCount(dictionary);
+        if (depth >= 3) return [NSString stringWithFormat:@"<dictionary:%ld keys>", (long)count];
+
+        const void **keys = count > 0 ? calloc((size_t)count, sizeof(void *)) : NULL;
+        if (count > 0 && !keys) return [NSString stringWithFormat:@"<dictionary:%ld keys; no memory>", (long)count];
+        CFDictionaryGetKeysAndValues(dictionary, keys, NULL);
+
+        NSMutableArray<NSString *> *stringKeys = [NSMutableArray array];
+        for (CFIndex index = 0; index < count; index++) {
+            if (keys[index] && CFGetTypeID(keys[index]) == CFStringGetTypeID()) {
+                [stringKeys addObject:(__bridge NSString *)keys[index]];
+            }
+        }
+        [stringKeys sortUsingSelector:@selector(compare:)];
+        NSMutableArray<NSString *> *items = [NSMutableArray array];
+        NSUInteger limit = MIN(stringKeys.count, 10);
+        for (NSUInteger index = 0; index < limit; index++) {
+            NSString *key = stringKeys[index];
+            CFTypeRef child = CFDictionaryGetValue(dictionary, (__bridge CFStringRef)key);
+            [items addObject:[NSString stringWithFormat:@"%@=%@",
+                key, VCMDescribeMetadataValue(child, depth + 1)]];
+        }
+        if (stringKeys.count > limit) [items addObject:@"…"];
+        free(keys);
+        return [NSString stringWithFormat:@"{%@}", [items componentsJoinedByString:@","]];
+    }
+    return [NSString stringWithFormat:@"<CFType:%lu>", (unsigned long)type];
+}
+
+static NSString *VCMDescribeInterestingDictionaryValues(CFDictionaryRef dictionary) {
+    if (!dictionary) return @"[]";
+    CFIndex count = CFDictionaryGetCount(dictionary);
+    if (count <= 0) return @"[]";
+
+    const void **keys = calloc((size_t)count, sizeof(void *));
+    const void **values = calloc((size_t)count, sizeof(void *));
+    if (!keys || !values) {
+        free(keys);
+        free(values);
+        return @"[allocation-failed]";
+    }
+    CFDictionaryGetKeysAndValues(dictionary, keys, values);
+
+    NSMutableArray<NSString *> *items = [NSMutableArray array];
+    for (CFIndex index = 0; index < count && items.count < 8; index++) {
+        if (!keys[index] || CFGetTypeID(keys[index]) != CFStringGetTypeID()) continue;
+        NSString *name = [(__bridge NSString *)keys[index] lowercaseString];
+        BOOL relevant =
+            [name containsString:@"metadata"] ||
+            [name containsString:@"orientation"] ||
+            [name containsString:@"upright"] ||
+            [name containsString:@"rotation"] ||
+            [name containsString:@"transform"];
+        if (!relevant) continue;
+
+        NSString *originalName = (__bridge NSString *)keys[index];
+        [items addObject:[NSString stringWithFormat:@"%@=%@",
+            originalName, VCMDescribeMetadataValue((CFTypeRef)values[index], 0)]];
+    }
+    free(keys);
+    free(values);
+
+    NSString *result = [NSString stringWithFormat:@"[%@]", [items componentsJoinedByString:@";"]];
+    if (result.length > 1150) {
+        result = [[result substringToIndex:1150] stringByAppendingString:@"…"];
+    }
+    return result;
+}
+
 static void VCMLogCameraFrameContract(id object, CMSampleBufferRef sampleBuffer,
                                       CVPixelBufferRef pixelBuffer) {
     uint32_t index = atomic_fetch_add_explicit(&g_vcmOrientationDiagnosticCount, 1,
@@ -134,7 +243,7 @@ static void VCMLogCameraFrameContract(id object, CMSampleBufferRef sampleBuffer,
         ? (CFDictionaryRef)CFArrayGetValueAtIndex(perSample, 0) : NULL;
 
     NSString *diagnostic = [NSString stringWithFormat:
-        @"[VCam Pro/OrientationDiag] #%u node=%s pixel=%zux%zu format=%dx%d pixelFormat=%u formatExt=%@ pixelProp=%@ pixelNoProp=%@ sampleProp=%@ sampleEntry=%@",
+        @"[VCam Pro/OrientationDiag] #%u node=%s pixel=%zux%zu format=%dx%d pixelFormat=%u formatExt=%@ formatValues=%@ pixelProp=%@ pixelPropValues=%@ pixelNoProp=%@ pixelNoPropValues=%@ sampleProp=%@ samplePropValues=%@ sampleEntry=%@ sampleEntryValues=%@",
         index + 1,
         object_getClassName(object),
         CVPixelBufferGetWidth(pixelBuffer),
@@ -143,10 +252,15 @@ static void VCMLogCameraFrameContract(id object, CMSampleBufferRef sampleBuffer,
         formatDimensions.height,
         (unsigned int)CVPixelBufferGetPixelFormatType(pixelBuffer),
         VCMDescribeDictionaryKeys(formatExtensions),
+        VCMDescribeInterestingDictionaryValues(formatExtensions),
         VCMDescribeDictionaryKeys(propagated),
+        VCMDescribeInterestingDictionaryValues(propagated),
         VCMDescribeDictionaryKeys(nonPropagated),
+        VCMDescribeInterestingDictionaryValues(nonPropagated),
         VCMDescribeDictionaryKeys(sampleAttachments),
-        VCMDescribeDictionaryKeys(perSampleDictionary)];
+        VCMDescribeInterestingDictionaryValues(sampleAttachments),
+        VCMDescribeDictionaryKeys(perSampleDictionary),
+        VCMDescribeInterestingDictionaryValues(perSampleDictionary)];
     NSLog(@"%@", diagnostic);
     VCMAppendOrientationDiagnostic(diagnostic);
 
