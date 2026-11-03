@@ -5,6 +5,7 @@ on:
     branches:
       - main
       - fix/remove-invalid-photoutput-hook
+      - diag/read-bwnode-metadata-values
     tags:
       - 'v*'
 
