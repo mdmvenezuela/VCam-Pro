@@ -88,32 +88,7 @@ static BOOL VCamIsEnabled(void) {
 
 static void VCamAppendOrientationDiagnosticLine(NSString *message) {
     if (![message isKindOfClass:[NSString class]] || message.length == 0) return;
-
-    const char *directory = "/var/mobile/Documents";
-    const char *path = "/var/mobile/Documents/VCam-OrientationDiag.log";
-    mkdir(directory, 0755);
-
-    int fd = open(path, O_WRONLY | O_CREAT | O_APPEND, 0644);
-    if (fd < 0) {
-        NSLog(@"[VCam Pro/OrientationDiag] No se pudo abrir el archivo: %s", strerror(errno));
-        return;
-    }
-
-    NSString *line = [message stringByAppendingString:@"\n"];
-    NSData *data = [line dataUsingEncoding:NSUTF8StringEncoding];
-    const uint8_t *bytes = (const uint8_t *)(const uint8_t *)data.bytes;
-    size_t remaining = data.length;
-    while (remaining > 0) {
-        ssize_t written = write(fd, bytes, remaining);
-        if (written < 0) {
-            if (errno == EINTR) continue;
-            break;
-        }
-        if (written == 0) break;
-        bytes += written;
-        remaining -= (size_t)written;
-    }
-    close(fd);
+    [[VCamSharedState sharedState] appendOrientationDiagnostic:message];
 }
 
 static void VCamLogConnectionOrientation(CMSampleBufferRef sampleBuffer,
