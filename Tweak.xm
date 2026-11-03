@@ -2099,6 +2099,44 @@ static NSString *VCamImageDataSummary(NSData *data) {
     return serializedData;
 }
 
+- (AVSemanticSegmentationMatte *)semanticSegmentationMatteForType:(NSString *)matteType {
+    AVSemanticSegmentationMatte *matte = %orig(matteType);
+    CVPixelBufferRef matteBuffer = matte.mattingImage;
+    NSString *summary = matte
+        ? [NSString stringWithFormat:@"present type=%@ pixelFormat=%u buffer={%@}",
+            matteType ?: @"(unknown)",
+            (unsigned int)matte.pixelFormatType,
+            VCamPixelBufferSummary(matteBuffer)]
+        : [NSString stringWithFormat:@"absent type=%@", matteType ?: @"(unknown)"];
+    VCamLogPhotoPropertyAccess(@"semanticSegmentationMatteForType", summary);
+    return matte;
+}
+
+- (NSData *)fileDataRepresentationWithReplacementMetadata:(NSDictionary<NSString *, id> *)replacementMetadata
+replacementEmbeddedThumbnailPhotoFormat:(NSDictionary<NSString *, id> *)replacementEmbeddedThumbnailPhotoFormat
+replacementEmbeddedThumbnailPixelBuffer:(CVPixelBufferRef)replacementEmbeddedThumbnailPixelBuffer
+replacementDepthData:(AVDepthData *)replacementDepthData {
+    VCamLogPhotoPropertyAccess(
+        @"fileDataRepresentationWithReplacementMetadata",
+        [NSString stringWithFormat:
+            @"metadata={%@} thumbnailFormat={%@} thumbnailBuffer={%@} replacementDepth={%@}",
+            VCamDictionarySchema(replacementMetadata, NO),
+            VCamDictionarySchema(replacementEmbeddedThumbnailPhotoFormat, YES),
+            VCamPixelBufferSummary(replacementEmbeddedThumbnailPixelBuffer),
+            VCamDepthSummary(replacementDepthData)]
+    );
+
+    NSData *result = %orig(replacementMetadata,
+                           replacementEmbeddedThumbnailPhotoFormat,
+                           replacementEmbeddedThumbnailPixelBuffer,
+                           replacementDepthData);
+
+    NSLog(@"[VCam PhotoDiag] FILE_DATA alternateMethod=fileDataRepresentationWithReplacementMetadata output={%@}",
+          VCamImageDataSummary(result));
+    return result;
+}
+
+
 %end
 
 #pragma mark - Still Photo Output Delegate Proxy
