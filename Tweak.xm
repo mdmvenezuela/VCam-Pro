@@ -983,30 +983,6 @@ static NSData *VCamReplacementDataForPhoto(AVCapturePhoto *photo) {
     return (CGImageRef)CFAutorelease(replacement);
 }
 
-%hook AVCapturePhotoOutput
-
-- (void)captureOutput:(AVCaptureOutput *)output didOutputSampleBuffer:(CMSampleBufferRef)sampleBuffer fromConnection:(AVCaptureConnection *)connection {
-    if (!VCamIsEnabled() || ![MediaManager sharedManager].isReady) {
-        %orig;
-        return;
-    }
-
-    CVImageBufferRef originalBuffer = CMSampleBufferGetImageBuffer(sampleBuffer);
-    CGSize bufferSize = originalBuffer ? CGSizeMake(CVPixelBufferGetWidth(originalBuffer), CVPixelBufferGetHeight(originalBuffer)) : CGSizeMake(1280, 720);
-    OSType pixelFormat = originalBuffer ? CVPixelBufferGetPixelFormatType(originalBuffer) : kCVPixelFormatType_32BGRA;
-
-    CMSampleBufferRef virtualBuffer = [[MediaManager sharedManager] nextVideoFrameForSize:bufferSize pixelFormat:pixelFormat];
-    
-    if (virtualBuffer) {
-        %orig(output, virtualBuffer, connection);
-        CFRelease(virtualBuffer);
-        return;
-    }
-
-    %orig;
-}
-
-%end
 
 - (NSData *)fileDataRepresentation {
     NSData *original = %orig;
@@ -1085,6 +1061,31 @@ static NSData *VCamReplacementDataForPhoto(AVCapturePhoto *photo) {
 
     NSLog(@"[VCam Pro] fileDataRepresentation procesó con éxito la foto sintética con orientación adaptada (%lu bytes).", (unsigned long)syntheticJPEG.length);
     return syntheticJPEG;
+}
+
+%end
+
+%hook AVCapturePhotoOutput
+
+- (void)captureOutput:(AVCaptureOutput *)output didOutputSampleBuffer:(CMSampleBufferRef)sampleBuffer fromConnection:(AVCaptureConnection *)connection {
+    if (!VCamIsEnabled() || ![MediaManager sharedManager].isReady) {
+        %orig;
+        return;
+    }
+
+    CVImageBufferRef originalBuffer = CMSampleBufferGetImageBuffer(sampleBuffer);
+    CGSize bufferSize = originalBuffer ? CGSizeMake(CVPixelBufferGetWidth(originalBuffer), CVPixelBufferGetHeight(originalBuffer)) : CGSizeMake(1280, 720);
+    OSType pixelFormat = originalBuffer ? CVPixelBufferGetPixelFormatType(originalBuffer) : kCVPixelFormatType_32BGRA;
+
+    CMSampleBufferRef virtualBuffer = [[MediaManager sharedManager] nextVideoFrameForSize:bufferSize pixelFormat:pixelFormat];
+    
+    if (virtualBuffer) {
+        %orig(output, virtualBuffer, connection);
+        CFRelease(virtualBuffer);
+        return;
+    }
+
+    %orig;
 }
 
 %end
