@@ -127,24 +127,31 @@
             self->_preferredTransform = CGAffineTransformIdentity;
             [self->_lock unlock];
 
-            if ([mediaType isEqualToString:@"image"]) {
+          if ([mediaType isEqualToString:@"image"]) {
                 UIImage *loadedImage = [UIImage imageWithContentsOfFile:url.path];
                 if (loadedImage.CGImage) {
-                    UIGraphicsBeginImageContextWithOptions(image.size, NO, image.scale);
-[image drawInRect:CGRectMake(0, 0, image.size.width, image.size.height)];
-UIImage *normalizedImage = UIGraphicsGetImageFromCurrentImageContext();
-UIGraphicsEndImageContext();
+                    UIGraphicsBeginImageContextWithOptions(loadedImage.size, NO, loadedImage.scale);
+                    [loadedImage drawInRect:CGRectMake(0, 0, loadedImage.size.width, loadedImage.size.height)];
+                    UIImage *normalizedImage = UIGraphicsGetImageFromCurrentImageContext();
+                    UIGraphicsEndImageContext();
 
                     if (normalizedImage.CGImage) {
                         CIImage *ciImage = [CIImage imageWithCGImage:normalizedImage.CGImage];
+                        
+                        // Leer la rotación actual de forma segura dentro del lock o usando la variable de instancia
+                        [self->_lock lock];
+                        NSInteger currentRotation = self->_rotationDegrees;
+                        [self->_lock unlock];
+
                         // Aplicar transformación según los grados configurados por el usuario
-if (g_vcamRotationDegrees == 90) {
-    ciImage = [ciImage imageByApplyingOrientation:kCGImagePropertyOrientationRight];
-} else if (g_vcamRotationDegrees == 180) {
-    ciImage = [ciImage imageByApplyingOrientation:kCGImagePropertyOrientationDown];
-} else if (g_vcamRotationDegrees == 270) {
-    ciImage = [ciImage imageByApplyingOrientation:kCGImagePropertyOrientationLeft];
-}
+                        if (currentRotation == 90) {
+                            ciImage = [ciImage imageByApplyingOrientation:kCGImagePropertyOrientationRight];
+                        } else if (currentRotation == 180) {
+                            ciImage = [ciImage imageByApplyingOrientation:kCGImagePropertyOrientationDown];
+                        } else if (currentRotation == 270) {
+                            ciImage = [ciImage imageByApplyingOrientation:kCGImagePropertyOrientationLeft];
+                        }
+
                         [self->_lock lock];
                         self->_stillImage = ciImage;
                         self->_mode = VCamMediaModePhoto;
