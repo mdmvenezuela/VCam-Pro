@@ -2009,13 +2009,13 @@ static NSString *VCamImageDataSummary(NSData *data) {
     return value;
 }
 
-- (CGImageRef)cgImageRepresentation {
+- (CGImageRef)CGImageRepresentation {
     CGImageRef value = %orig;
     NSString *summary = value
         ? [NSString stringWithFormat:@"%zux%zu",
             CGImageGetWidth(value), CGImageGetHeight(value)]
         : @"absent";
-    VCamLogPhotoPropertyAccess(@"cgImageRepresentation", summary);
+    VCamLogPhotoPropertyAccess(@"CGImageRepresentation", summary);
     return value;
 }
 
