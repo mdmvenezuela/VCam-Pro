@@ -77,11 +77,7 @@ static void VCMAppendOrientationDiagnostic(NSString *message) {
         }
 
         NSString *header = [NSString stringWithFormat:
-            @"POST /orientation-diagnostic HTTP/1.1\\r\\n"
-             "Host: 127.0.0.1\\r\\n"
-             "Content-Type: application/json\\r\\n"
-             "Content-Length: %lu\\r\\n"
-             "Connection: close\\r\\n\\r\\n",
+            @"POST /orientation-diagnostic HTTP/1.1\r\nHost: 127.0.0.1\r\nContent-Type: application/json\r\nContent-Length: %lu\r\nConnection: close\r\n\r\n",
             (unsigned long)body.length];
         BOOL sent = VCMSendStatusBytes(fd, header.UTF8String, header.length) &&
                     VCMSendStatusBytes(fd, body.bytes, body.length);
