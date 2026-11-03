@@ -6,6 +6,7 @@
 #import <ImageIO/ImageIO.h>
 #import <QuartzCore/QuartzCore.h>
 #import <objc/runtime.h>
+#import <objc/message.h>
 #import <arpa/inet.h>
 #import <errno.h>
 #import <netinet/in.h>
@@ -57,6 +58,7 @@ static char g_darwinObserverToken;
 static const void *kVCamDelegateProxyKey = &kVCamDelegateProxyKey;
 static NSUInteger g_vcamVideoCallbackCount = 0;
 static NSUInteger g_vcamVideoReplacementCount = 0;
+static NSUInteger g_vcamOrientationContractDiagnosticCount = 0;
 static NSHashTable<CALayer *> *g_previewOverlayLayers = nil;
 static CIContext *g_previewCIContext = nil;
 static dispatch_source_t g_previewPumpTimer = nil;
@@ -81,6 +83,92 @@ static BOOL VCamIsEnabled(void) {
     @synchronized ([MediaManager class]) {
         return g_vcamEnabled;
     }
+}
+
+
+static void VCamAppendOrientationDiagnosticLine(NSString *message) {
+    if (![message isKindOfClass:[NSString class]] || message.length == 0) return;
+
+    const char *directory = "/var/mobile/Documents";
+    const char *path = "/var/mobile/Documents/VCam-OrientationDiag.log";
+    mkdir(directory, 0755);
+
+    int fd = open(path, O_WRONLY | O_CREAT | O_APPEND, 0644);
+    if (fd < 0) {
+        NSLog(@"[VCam Pro/OrientationDiag] No se pudo abrir el archivo: %s", strerror(errno));
+        return;
+    }
+
+    NSString *line = [message stringByAppendingString:@"\n"];
+    NSData *data = [line dataUsingEncoding:NSUTF8StringEncoding];
+    const uint8_t *bytes = data.bytes;
+    size_t remaining = data.length;
+    while (remaining > 0) {
+        ssize_t written = write(fd, bytes, remaining);
+        if (written < 0) {
+            if (errno == EINTR) continue;
+            break;
+        }
+        if (written == 0) break;
+        bytes += written;
+        remaining -= (size_t)written;
+    }
+    close(fd);
+}
+
+static void VCamLogConnectionOrientation(CMSampleBufferRef sampleBuffer,
+                                         AVCaptureOutput *output,
+                                         AVCaptureConnection *connection) {
+    NSUInteger diagnosticNumber = 0;
+    @synchronized ([AVCaptureVideoDataOutput class]) {
+        if (g_vcamOrientationContractDiagnosticCount < 24) {
+            g_vcamOrientationContractDiagnosticCount += 1;
+            diagnosticNumber = g_vcamOrientationContractDiagnosticCount;
+        }
+    }
+    if (diagnosticNumber == 0) return;
+
+    CVImageBufferRef imageBuffer = sampleBuffer ? CMSampleBufferGetImageBuffer(sampleBuffer) : NULL;
+    size_t width = imageBuffer ? CVPixelBufferGetWidth(imageBuffer) : 0;
+    size_t height = imageBuffer ? CVPixelBufferGetHeight(imageBuffer) : 0;
+    OSType pixelFormat = imageBuffer ? CVPixelBufferGetPixelFormatType(imageBuffer) : 0;
+
+    CMVideoDimensions formatDimensions = {0, 0};
+    CMFormatDescriptionRef format = sampleBuffer ? CMSampleBufferGetFormatDescription(sampleBuffer) : NULL;
+    if (format && CMFormatDescriptionGetMediaType(format) == kCMMediaType_Video) {
+        formatDimensions = CMVideoFormatDescriptionGetDimensions((CMVideoFormatDescriptionRef)format);
+    }
+
+    NSInteger orientation = connection ? (NSInteger)connection.videoOrientation : -1;
+    BOOL orientationSupported = connection ? connection.isVideoOrientationSupported : NO;
+    BOOL videoMirrored = connection ? connection.videoMirrored : NO;
+    BOOL mirroringSupported = connection ? connection.isVideoMirroringSupported : NO;
+
+    CGFloat rotationAngle = NAN;
+    SEL rotationSelector = NSSelectorFromString(@"videoRotationAngle");
+    if (connection && [connection respondsToSelector:rotationSelector]) {
+        CGFloat (*sendCGFloat)(id, SEL) = (CGFloat (*)(id, SEL))objc_msgSend;
+        rotationAngle = sendCGFloat(connection, rotationSelector);
+    }
+
+    NSString *application = NSBundle.mainBundle.bundleIdentifier ?: @"(sin bundle)";
+    NSString *outputClass = output ? NSStringFromClass([output class]) : @"(nil)";
+    NSString *diagnostic = [NSString stringWithFormat:
+        @"[VCam Pro/OrientationDiag] APP_FRAME #%lu app=%@ output=%@ sample=%zux%zu format=%dx%d pixel=%u connectionOrientation=%ld orientationSupported=%d videoMirrored=%d mirroringSupported=%d rotationAngle=%.1f",
+        (unsigned long)diagnosticNumber,
+        application,
+        outputClass,
+        width,
+        height,
+        formatDimensions.width,
+        formatDimensions.height,
+        (unsigned int)pixelFormat,
+        (long)orientation,
+        orientationSupported,
+        videoMirrored,
+        mirroringSupported,
+        rotationAngle];
+    VCamAppendOrientationDiagnosticLine(diagnostic);
 }
 
 static void VCamSetLocalEnabled(BOOL enabled) {
@@ -662,6 +750,7 @@ static void VCamAttachPreviewOverlay(AVCaptureVideoPreviewLayer *previewLayer) {
     }
 
     id<AVCaptureVideoDataOutputSampleBufferDelegate> delegate = self.originalDelegate;
+    VCamLogConnectionOrientation(sampleBuffer, output, connection);
     if (!delegate) {
         NSLog(@"[VCam Pro] El delegado original de AVCaptureVideoDataOutput ya no existe.");
         return;
