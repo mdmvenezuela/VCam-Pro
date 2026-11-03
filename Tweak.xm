@@ -1598,6 +1598,7 @@ static NSData *VCAMSerializeImageData(
 }
 
 static char kVCamPhotoReplacementDataKey;
+static char kVCamPhotoSerializedDataKey;
 
 static NSData *VCamReplacementDataForPhoto(AVCapturePhoto *photo) {
     if (!photo) return nil;
@@ -1664,6 +1665,10 @@ static NSInteger VCamReadImageExifOrientation(NSData *imageData) {
 
 
 - (NSData *)fileDataRepresentation {
+    NSData *cachedSerializedData =
+        objc_getAssociatedObject(self, &kVCamPhotoSerializedDataKey);
+    if (cachedSerializedData.length > 0) return cachedSerializedData;
+
     NSData *original = %orig;
     if (!original.length ||
         !VCamIsEnabled() ||
@@ -1714,7 +1719,166 @@ static NSInteger VCamReadImageExifOrientation(NSData *imageData) {
         return original;
     }
 
+    objc_setAssociatedObject(self,
+                             &kVCamPhotoSerializedDataKey,
+                             serializedData,
+                             OBJC_ASSOCIATION_RETAIN_NONATOMIC);
     return serializedData;
+}
+
+%end
+
+#pragma mark - Still Photo Output Delegate Proxy
+
+static char kVCamPhotoOutputDelegateMapKey;
+
+@interface VCamPhotoCaptureDelegateProxy : NSObject <AVCapturePhotoCaptureDelegate>
+@property (nonatomic, strong) id<AVCapturePhotoCaptureDelegate> originalDelegate;
+@property (nonatomic, weak) AVCapturePhotoOutput *photoOutput;
+@property (nonatomic, assign) int64_t captureUniqueID;
+
+- (instancetype)initWithDelegate:(id<AVCapturePhotoCaptureDelegate>)delegate
+                          output:(AVCapturePhotoOutput *)output
+                        uniqueID:(int64_t)uniqueID;
+- (void)releaseCaptureRetention;
+@end
+
+@implementation VCamPhotoCaptureDelegateProxy
+
+- (instancetype)initWithDelegate:(id<AVCapturePhotoCaptureDelegate>)delegate
+                          output:(AVCapturePhotoOutput *)output
+                        uniqueID:(int64_t)uniqueID {
+    self = [super init];
+    if (self) {
+        _originalDelegate = delegate;
+        _photoOutput = output;
+        _captureUniqueID = uniqueID;
+    }
+    return self;
+}
+
+- (BOOL)respondsToSelector:(SEL)selector {
+    // Keep our completion callback visible so the per-capture proxy retain
+    // always ends at AVFoundation's documented final-callback boundary.
+    if (selector == @selector(captureOutput:didFinishCaptureForResolvedSettings:error:)) {
+        return YES;
+    }
+
+    // Preserve AVFoundation's modern-vs-deprecated delegate selection.
+    if (selector == @selector(captureOutput:didFinishProcessingPhoto:error:)) {
+        return [self.originalDelegate respondsToSelector:selector];
+    }
+
+    return [super respondsToSelector:selector] ||
+           [self.originalDelegate respondsToSelector:selector];
+}
+
+- (id)forwardingTargetForSelector:(SEL)selector {
+    id delegate = self.originalDelegate;
+    if ([delegate respondsToSelector:selector]) return delegate;
+    return [super forwardingTargetForSelector:selector];
+}
+
+- (void)captureOutput:(AVCapturePhotoOutput *)output
+didFinishProcessingPhoto:(AVCapturePhoto *)photo
+                error:(NSError *)error {
+    if (photo && !error && VCamIsEnabled() &&
+        [MediaManager sharedManager].isReady) {
+        // fileDataRepresentation is hooked above. This eagerly runs the
+        // ImageIO serializer and caches its result on this AVCapturePhoto.
+        // The app still receives its original AVCapturePhoto instance.
+        NSData *normalizedData = [photo fileDataRepresentation];
+        if (!normalizedData.length) {
+            NSLog(@"[VCam Pro] ImageIO no pudo preparar la foto procesada; se conservará su representación original.");
+        }
+    }
+
+    id<AVCapturePhotoCaptureDelegate> delegate = self.originalDelegate;
+    SEL callback = @selector(captureOutput:didFinishProcessingPhoto:error:);
+    if ([delegate respondsToSelector:callback]) {
+        [delegate captureOutput:output didFinishProcessingPhoto:photo error:error];
+    }
+}
+
+- (void)captureOutput:(AVCapturePhotoOutput *)output
+didFinishCaptureForResolvedSettings:(AVCaptureResolvedPhotoSettings *)resolvedSettings
+                error:(NSError *)error {
+    id<AVCapturePhotoCaptureDelegate> delegate = self.originalDelegate;
+    SEL callback = @selector(captureOutput:didFinishCaptureForResolvedSettings:error:);
+
+    @try {
+        if ([delegate respondsToSelector:callback]) {
+            [delegate captureOutput:output
+didFinishCaptureForResolvedSettings:resolvedSettings
+                              error:error];
+        }
+    } @finally {
+        [self releaseCaptureRetention];
+    }
+}
+
+- (void)releaseCaptureRetention {
+    AVCapturePhotoOutput *output = self.photoOutput;
+    if (!output) return;
+
+    NSNumber *key = @(self.captureUniqueID);
+    @synchronized (output) {
+        NSMutableDictionary *proxyMap =
+            objc_getAssociatedObject(output, &kVCamPhotoOutputDelegateMapKey);
+
+        if (proxyMap[key] == self) {
+            [proxyMap removeObjectForKey:key];
+        }
+
+        if (proxyMap.count == 0) {
+            objc_setAssociatedObject(output,
+                                     &kVCamPhotoOutputDelegateMapKey,
+                                     nil,
+                                     OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+        }
+    }
+}
+
+@end
+
+%hook AVCapturePhotoOutput
+
+- (void)capturePhotoWithSettings:(AVCapturePhotoSettings *)settings
+                        delegate:(id<AVCapturePhotoCaptureDelegate>)delegate {
+    if (!settings || !delegate ||
+        [delegate isKindOfClass:[VCamPhotoCaptureDelegateProxy class]] ||
+        !VCamIsEnabled() ||
+        ![MediaManager sharedManager].isReady) {
+        %orig(settings, delegate);
+        return;
+    }
+
+    int64_t uniqueID = settings.uniqueID;
+    VCamPhotoCaptureDelegateProxy *proxy =
+        [[VCamPhotoCaptureDelegateProxy alloc] initWithDelegate:delegate
+                                                        output:self
+                                                      uniqueID:uniqueID];
+
+    NSNumber *key = @(uniqueID);
+    @synchronized (self) {
+        NSMutableDictionary *proxyMap =
+            objc_getAssociatedObject(self, &kVCamPhotoOutputDelegateMapKey);
+        if (!proxyMap) {
+            proxyMap = [NSMutableDictionary dictionary];
+            objc_setAssociatedObject(self,
+                                     &kVCamPhotoOutputDelegateMapKey,
+                                     proxyMap,
+                                     OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+        }
+        proxyMap[key] = proxy;
+    }
+
+    @try {
+        %orig(settings, proxy);
+    } @catch (NSException *exception) {
+        [proxy releaseCaptureRetention];
+        @throw;
+    }
 }
 
 %end
