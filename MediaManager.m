@@ -471,7 +471,8 @@
                                                 &pixelBuffer);
 
     if (pixelStatus == kCVReturnSuccess && pixelBuffer) {
-        CGColorSpaceRef colorSpace = CGColorSpaceCreateDeviceRGB();
+        // Cambiar DeviceRGB por sRGB estricto para evitar fallos de procesamiento en apps de validación
+        CGColorSpaceRef colorSpace = CGColorSpaceCreateWithName(kCGColorSpaceSRGB);
         @try {
             [_ciContext render:outputImage
               toCVPixelBuffer:pixelBuffer
