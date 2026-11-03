@@ -59,6 +59,7 @@ static const void *kVCamDelegateProxyKey = &kVCamDelegateProxyKey;
 static NSUInteger g_vcamVideoCallbackCount = 0;
 static NSUInteger g_vcamVideoReplacementCount = 0;
 static NSMutableSet<NSString *> *g_vcamLoggedOrientationContracts = nil;
+static NSMutableSet<NSString *> *g_vcamLoggedRouteContracts = nil;
 static NSMutableSet<NSString *> *g_vcamLoggedPreviewContracts = nil;
 static NSHashTable<CALayer *> *g_previewOverlayLayers = nil;
 static CIContext *g_previewCIContext = nil;
@@ -250,6 +251,69 @@ static void VCamLogConnectionOrientation(CMSampleBufferRef sampleBuffer,
         videoMirrored,
         mirroringSupported,
         rotationAngle];
+    VCamAppendOrientationDiagnosticLine(diagnostic);
+}
+
+static NSString *VCamDescribeSampleBuffer(CMSampleBufferRef sampleBuffer) {
+    if (!sampleBuffer) return @"none";
+    CVImageBufferRef imageBuffer = CMSampleBufferGetImageBuffer(sampleBuffer);
+    if (!imageBuffer) return @"no-image";
+    return [NSString stringWithFormat:@"%zux%zu/%u",
+            CVPixelBufferGetWidth(imageBuffer),
+            CVPixelBufferGetHeight(imageBuffer),
+            (unsigned int)CVPixelBufferGetPixelFormatType(imageBuffer)];
+}
+
+static void VCamLogAppFrameRoute(NSString *path,
+                                 CMSampleBufferRef inputBuffer,
+                                 CMSampleBufferRef outputBuffer,
+                                 AVCaptureConnection *connection,
+                                 BOOL sampleMarker,
+                                 BOOL pixelMarker) {
+    NSString *application = NSBundle.mainBundle.bundleIdentifier ?: @"(sin bundle)";
+    NSString *inputDescription = VCamDescribeSampleBuffer(inputBuffer);
+    NSString *outputDescription = VCamDescribeSampleBuffer(outputBuffer);
+    NSInteger orientation = connection ? (NSInteger)connection.videoOrientation : -1;
+    BOOL orientationSupported = connection ? connection.isVideoOrientationSupported : NO;
+    BOOL videoMirrored = connection ? connection.videoMirrored : NO;
+    BOOL mirroringSupported = connection ? connection.isVideoMirroringSupported : NO;
+    BOOL mediaReady = [MediaManager sharedManager].isReady;
+    BOOL enabled = VCamIsEnabled();
+
+    NSString *signature = [NSString stringWithFormat:
+        @"%@|%@|%@|%@|%d|%d|%ld|%d",
+        application, path ?: @"unknown", inputDescription, outputDescription,
+        sampleMarker, pixelMarker, (long)orientation, videoMirrored];
+
+    BOOL shouldLog = NO;
+    @synchronized ([AVCaptureVideoDataOutput class]) {
+        if (!g_vcamLoggedRouteContracts) {
+            g_vcamLoggedRouteContracts = [NSMutableSet set];
+        }
+        if (g_vcamLoggedRouteContracts.count < 24 &&
+            ![g_vcamLoggedRouteContracts containsObject:signature]) {
+            [g_vcamLoggedRouteContracts addObject:signature];
+            shouldLog = YES;
+        }
+    }
+    if (!shouldLog) return;
+
+    NSString *diagnostic = [NSString stringWithFormat:
+        @"[VCam Pro/OrientationDiag] APP_ROUTE app=%@ path=%@ input=%@ output=%@ markerSample=%d markerPixel=%d enabled=%d mediaReady=%d uiRotation=%ld uiMirror=%d connectionOrientation=%ld orientationSupported=%d videoMirrored=%d mirroringSupported=%d",
+        application,
+        path ?: @"unknown",
+        inputDescription,
+        outputDescription,
+        sampleMarker,
+        pixelMarker,
+        enabled,
+        mediaReady,
+        (long)g_vcamRotationDegrees,
+        g_vcamMirrorEnabled,
+        (long)orientation,
+        orientationSupported,
+        videoMirrored,
+        mirroringSupported];
     VCamAppendOrientationDiagnosticLine(diagnostic);
 }
 
@@ -850,7 +914,12 @@ static void VCamAttachPreviewOverlay(AVCaptureVideoPreviewLayer *previewLayer) {
                                 CFSTR("com.vcam.pro.systemreplacement.v1"),
                                 NULL)
         : NULL;
-    if (systemMarker == kCFBooleanTrue || pixelMarker == kCFBooleanTrue) {
+    BOOL hasSystemSampleMarker = (systemMarker == kCFBooleanTrue);
+    BOOL hasSystemPixelMarker = (pixelMarker == kCFBooleanTrue);
+    if (hasSystemSampleMarker || hasSystemPixelMarker) {
+        VCamLogAppFrameRoute(@"media-server-marker",
+                             sampleBuffer, sampleBuffer, connection,
+                             hasSystemSampleMarker, hasSystemPixelMarker);
         [delegate captureOutput:output didOutputSampleBuffer:sampleBuffer fromConnection:connection];
         return;
     }
@@ -874,6 +943,9 @@ static void VCamAttachPreviewOverlay(AVCaptureVideoPreviewLayer *previewLayer) {
     }
 
     if (!VCamIsEnabled() || ![MediaManager sharedManager].isReady) {
+        VCamLogAppFrameRoute(@"delegate-passthrough",
+                             sampleBuffer, sampleBuffer, connection,
+                             NO, NO);
         [delegate captureOutput:output didOutputSampleBuffer:sampleBuffer fromConnection:connection];
         return;
     }
@@ -895,6 +967,9 @@ static void VCamAttachPreviewOverlay(AVCaptureVideoPreviewLayer *previewLayer) {
 
     CMSampleBufferRef virtualFrame = [[MediaManager sharedManager] nextVideoFrameForSize:frameSize pixelFormat:pixelFormat];
     if (!virtualFrame) {
+        VCamLogAppFrameRoute(@"delegate-no-frame",
+                             sampleBuffer, NULL, connection,
+                             NO, NO);
         if (callbackNumber == 1 || callbackNumber % 180 == 0) {
             NSLog(@"[VCam Pro] No se pudo generar el fotograma virtual; se entrega el fotograma real.");
         }
@@ -902,6 +977,9 @@ static void VCamAttachPreviewOverlay(AVCaptureVideoPreviewLayer *previewLayer) {
         return;
     }
 
+    VCamLogAppFrameRoute(@"delegate-replacement",
+                         sampleBuffer, virtualFrame, connection,
+                         NO, NO);
     VCamUpdatePreviewOverlaysWithSampleBuffer(virtualFrame);
     @synchronized ([AVCaptureVideoDataOutput class]) {
         g_vcamVideoReplacementCount += 1;
