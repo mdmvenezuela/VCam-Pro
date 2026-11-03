@@ -1370,6 +1370,33 @@ static NSData *VCamReplacementDataForPhoto(AVCapturePhoto *photo) {
     return generated;
 }
 
+// Returns the stored EXIF orientation (1-8), or -1 when the JPEG has no
+// readable orientation tag. Used only for diagnostics; synthetic output is
+// deliberately normalized to EXIF/TIFF Up by VCMACreateSyntheticJPEG.
+static NSInteger VCamReadJPEGExifOrientation(NSData *jpegData) {
+    if (!jpegData.length) return -1;
+
+    CGImageSourceRef source = CGImageSourceCreateWithData((__bridge CFDataRef)jpegData, NULL);
+    if (!source) return -1;
+
+    CFDictionaryRef properties = CGImageSourceCopyPropertiesAtIndex(source, 0, NULL);
+    CFRelease(source);
+
+    NSInteger orientation = -1;
+    if (properties) {
+        CFTypeRef value = CFDictionaryGetValue(properties, kCGImagePropertyOrientation);
+        if (value && CFGetTypeID(value) == CFNumberGetTypeID()) {
+            int rawValue = 1;
+            if (CFNumberGetValue((CFNumberRef)value, kCFNumberIntType, &rawValue) &&
+                rawValue >= 1 && rawValue <= 8) {
+                orientation = rawValue;
+            }
+        }
+        CFRelease(properties);
+    }
+    return orientation;
+}
+
 %hook AVCapturePhoto
 
 - (CGImageRef)previewCGImageRepresentation {
@@ -1404,6 +1431,9 @@ static NSData *VCamReplacementDataForPhoto(AVCapturePhoto *photo) {
         return original;
     }
 
+    NSInteger originalExifOrientation = VCamReadJPEGExifOrientation(original);
+    NSInteger replacementExifOrientation = VCamReadJPEGExifOrientation(virtualJPEG);
+
     CGImageSourceRef imageSource = CGImageSourceCreateWithData((__bridge CFDataRef)virtualJPEG, NULL);
     if (!imageSource) return original;
 
@@ -1412,60 +1442,35 @@ static NSData *VCamReplacementDataForPhoto(AVCapturePhoto *photo) {
 
     if (!sourceImage) return original;
 
-    // Extraer y preservar la orientación original del contenedor para evitar giros en vistas circulares / WhatsApp
-    CGImagePropertyOrientation targetOrientation = kCGImagePropertyOrientationUp;
-    if (original.length > 0) {
-        CGImageSourceRef origSource = CGImageSourceCreateWithData((__bridge CFDataRef)original, NULL);
-        if (origSource) {
-            CFDictionaryRef origProps = CGImageSourceCopyPropertiesAtIndex(origSource, 0, NULL);
-            if (origProps) {
-                CFTypeRef orientationRef = CFDictionaryGetValue(origProps, kCGImagePropertyOrientation);
-                if (orientationRef && CFGetTypeID(orientationRef) == CFNumberGetTypeID()) {
-                    int orientationValue = 1;
-                    CFNumberGetValue((CFNumberRef)orientationRef, kCFNumberIntType, &orientationValue);
-                    targetOrientation = (CGImagePropertyOrientation)orientationValue;
-                }
-                
-                CFRelease(origProps);
-            }
-            CFRelease(origSource);
-        }
-    }
+    size_t sourceWidth = CGImageGetWidth(sourceImage);
+    size_t sourceHeight = CGImageGetHeight(sourceImage);
 
     NSError *error = nil;
     NSData *syntheticJPEG = VCMACreateSyntheticJPEG(sourceImage, &error);
     CGImageRelease(sourceImage);
 
     if (!syntheticJPEG.length || !VCamIsJPEGData(syntheticJPEG)) {
+        NSLog(@"[VCam Pro] No se pudo normalizar el JPEG sintético; se conserva la foto original: %@.", error);
         return original;
     }
 
-    // Re-etiquetar el JPEG sintético con la orientación exacta que la app cliente solicitó
-    if (targetOrientation != kCGImagePropertyOrientationUp) {
-        CGImageSourceRef synSource = CGImageSourceCreateWithData((__bridge CFDataRef)syntheticJPEG, NULL);
-        if (synSource) {
-            CGImageRef synImage = CGImageSourceCreateImageAtIndex(synSource, 0, NULL);
-            CFRelease(synSource);
-            if (synImage) {
-                NSMutableData *reorientedOutput = [NSMutableData data];
-                CGImageDestinationRef dest = CGImageDestinationCreateWithData((__bridge CFMutableDataRef)reorientedOutput, CFSTR("public.jpeg"), 1, NULL);
-                if (dest) {
-                    NSDictionary *reorientedProps = @{
-                        (id)kCGImagePropertyOrientation: @(targetOrientation),
-                        (id)kCGImageDestinationLossyCompressionQuality: @0.94
-                    };
-                    CGImageDestinationAddImage(dest, synImage, (__bridge CFDictionaryRef)reorientedProps);
-                    if (CGImageDestinationFinalize(dest)) {
-                        syntheticJPEG = reorientedOutput;
-                    }
-                    CFRelease(dest);
-                }
-                CGImageRelease(synImage);
-            }
-        }
-    }
+    // The source pixels are already rendered upright. Never copy the physical
+    // camera photo's EXIF orientation onto this synthetic JPEG: doing so would
+    // tell clients to rotate pixels that have already been normalized.
+    NSInteger outputExifOrientation = VCamReadJPEGExifOrientation(syntheticJPEG);
+    NSString *diagnostic = [NSString stringWithFormat:
+        @"[VCam Pro/OrientationDiag] PHOTO_EXIF_NORMALIZE app=%@ originalEXIF=%ld replacementEXIF=%ld outputEXIF=%ld pixels=%zux%zu originalBytes=%lu outputBytes=%lu",
+        NSBundle.mainBundle.bundleIdentifier ?: @"(sin bundle)",
+        (long)originalExifOrientation,
+        (long)replacementExifOrientation,
+        (long)outputExifOrientation,
+        sourceWidth,
+        sourceHeight,
+        (unsigned long)original.length,
+        (unsigned long)syntheticJPEG.length];
+    NSLog(@"%@", diagnostic);
+    VCamAppendOrientationDiagnosticLine(diagnostic);
 
-    NSLog(@"[VCam Pro] fileDataRepresentation procesó con éxito la foto sintética con orientación adaptada (%lu bytes).", (unsigned long)syntheticJPEG.length);
     return syntheticJPEG;
 }
 
