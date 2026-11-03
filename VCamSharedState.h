@@ -39,6 +39,9 @@ NS_ASSUME_NONNULL_BEGIN
 - (void)adjustOffsetX:(CGFloat)deltaX offsetY:(CGFloat)deltaY;
 - (void)adjustZoomBy:(CGFloat)delta;
 - (void)resetImageTransform;
+
+/// Sends a camera-orientation diagnostic line to SpringBoard for centralized file logging.
+- (void)appendOrientationDiagnostic:(NSString *)message;
 - (void)setButtonNormalizedX:(CGFloat)x y:(CGFloat)y;
 
 @end
