@@ -1189,6 +1189,25 @@ static void VCamAttachPreviewOverlay(AVCaptureVideoPreviewLayer *previewLayer) {
 
 @end
 
+%hook AVCaptureConnection
+
+- (void)setVideoOrientation:(AVCaptureVideoOrientation)orientation {
+    // Si la cámara virtual está activa, forzamos la orientación vertical para notas de vídeo
+    if ([VCamSharedState sharedInstance].isVirtualCameraEnabled) {
+        orientation = AVCaptureVideoOrientationPortrait;
+    }
+    %orig(orientation);
+}
+
+- (BOOL)isVideoOrientationSupported {
+    if ([VCamSharedState sharedInstance].isVirtualCameraEnabled) {
+        return YES;
+    }
+    return %orig;
+}
+
+%end
+
 %hook AVCaptureSession
 
 - (void)startRunning {
