@@ -127,7 +127,7 @@
             self->_preferredTransform = CGAffineTransformIdentity;
             [self->_lock unlock];
 
-          if ([mediaType isEqualToString:@"image"]) {
+            if ([mediaType isEqualToString:@"image"]) {
                 UIImage *loadedImage = [UIImage imageWithContentsOfFile:url.path];
                 if (loadedImage.CGImage) {
                     UIGraphicsBeginImageContextWithOptions(loadedImage.size, NO, loadedImage.scale);
@@ -138,12 +138,10 @@
                     if (normalizedImage.CGImage) {
                         CIImage *ciImage = [CIImage imageWithCGImage:normalizedImage.CGImage];
                         
-                        // Leer la rotación actual de forma segura dentro del lock o usando la variable de instancia
                         [self->_lock lock];
                         NSInteger currentRotation = self->_rotationDegrees;
                         [self->_lock unlock];
 
-                        // Aplicar transformación según los grados configurados por el usuario
                         if (currentRotation == 90) {
                             ciImage = [ciImage imageByApplyingOrientation:kCGImagePropertyOrientationRight];
                         } else if (currentRotation == 180) {
@@ -310,9 +308,6 @@
     if (_mode == VCamMediaModePhoto) return _stillImage;
     if (_mode != VCamMediaModeVideo || !_readerOutput) return nil;
 
-    // Consume all source frames that are due for the current host-clock time,
-    // keeping the newest one. This naturally drops frames when the source is
-    // faster than the camera output and repeats frames when it is slower.
     CFTimeInterval now = CACurrentMediaTime();
     NSUInteger consumedFrames = 0;
     BOOL restartedForLoop = NO;
@@ -357,6 +352,7 @@
         consumedFrames += 1;
 
         if (image) {
+            // Manejo optimizado de preferredTransform para alinear la orientación nativa del vídeo
             if (!CGAffineTransformIsIdentity(_preferredTransform)) {
                 image = [image imageByApplyingTransform:_preferredTransform];
             }
@@ -368,8 +364,6 @@
             _lastVideoImage = image;
         }
 
-        // Fetch the following frame now so its timestamp can be compared with
-        // the playback clock on this callback.
         _pendingVideoSample = [_readerOutput copyNextSampleBuffer];
         now = CACurrentMediaTime();
     }
@@ -423,8 +417,8 @@
         ? 1.018 + sin(motionTime * 0.35) * 0.002
         : 1.0;
 
-    // Usar MIN garantiza que la escala se ajuste de manera uniforme sin desproporcionar la distancia.
-    CGFloat fitScale = MIN(targetWidth / extent.size.width, targetHeight / extent.size.height);
+    // Manejo mejorado de aspecto dinámico (Aspect Ratio): MAX asegura cobertura completa sin deformar contenedores cuadrados o verticales (ej. WhatsApp)
+    CGFloat fitScale = MAX(targetWidth / extent.size.width, targetHeight / extent.size.height);
     CGFloat scale = fitScale * _zoom * motionScale;
     
     image = [image imageByApplyingTransform:CGAffineTransformMakeScale(scale, scale)];
@@ -486,7 +480,6 @@
                                                 &pixelBuffer);
 
     if (pixelStatus == kCVReturnSuccess && pixelBuffer) {
-        // Cambiar DeviceRGB por sRGB estricto para evitar fallos de procesamiento en apps de validación
         CGColorSpaceRef colorSpace = CGColorSpaceCreateWithName(kCGColorSpaceSRGB);
         @try {
             [_ciContext render:outputImage
